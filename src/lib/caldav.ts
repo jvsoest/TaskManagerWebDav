@@ -149,6 +149,29 @@ async function propfind(
   return parseMultiStatus(await response.text(), url)
 }
 
+async function fetchResourceEtag(url: string, authorization: string): Promise<string | undefined> {
+  const response = await davRequest(url, {
+    method: 'PROPFIND',
+    depth: '0',
+    headers: {
+      Authorization: authorization,
+    },
+    body: `<?xml version="1.0" encoding="utf-8" ?>
+      <d:propfind xmlns:d="DAV:">
+        <d:prop>
+          <d:getetag />
+        </d:prop>
+      </d:propfind>`,
+  })
+
+  const xml = new DOMParser().parseFromString(await response.text(), 'application/xml')
+  const resourceResponse = Array.from(xml.getElementsByTagName('*')).find(
+    (element) => element.localName === 'response',
+  )
+
+  return resourceResponse ? textContent(firstDescendant(resourceResponse, 'getetag')) : undefined
+}
+
 async function discoverHomeSet(input: AccountConnectionInput): Promise<{ displayName: string; homeSetUrl: string }> {
   const authorization = authHeader(input.username, input.password)
   const serverUrl = ensureTrailingSlash(input.serverUrl)
@@ -742,8 +765,9 @@ export async function upsertTaskRemote(
   metadataDoc: MetadataDocument,
 ): Promise<{ url: string; etag?: string }> {
   const url = task.url ?? resolveUrl(collection.url, `${task.uid}.ics`)
+  const authorization = authHeader(account.username, account.password)
   const headers: Record<string, string> = {
-    Authorization: authHeader(account.username, account.password),
+    Authorization: authorization,
     'Content-Type': 'text/calendar; charset=utf-8',
   }
 
@@ -764,9 +788,15 @@ export async function upsertTaskRemote(
     throw new Error(`Task save failed (${response.status}): ${message}`)
   }
 
+  const etag =
+    response.headers.get('etag') ??
+    response.headers.get('ETag') ??
+    (await fetchResourceEtag(url, authorization)) ??
+    undefined
+
   return {
     url,
-    etag: response.headers.get('etag') ?? undefined,
+    etag,
   }
 }
 
@@ -799,15 +829,26 @@ export async function saveMetadataRemote(
   collection: TaskCollection,
   metadataDoc: MetadataDocument,
 ): Promise<{ url: string; etag?: string }> {
-  return upsertTaskRemote(
-    account,
-    collection,
-    {
-      ...metadataTask(metadataDoc, collection.id),
-      url: metadataDoc.url ?? resolveUrl(collection.url, METADATA_RESOURCE_NAME),
-    },
-    metadataDoc,
-  )
+  const url = metadataDoc.url ?? resolveUrl(collection.url, METADATA_RESOURCE_NAME)
+  const metadataTaskItem = (etag = metadataDoc.etag): TaskItem => ({
+    ...metadataTask(metadataDoc, collection.id),
+    url,
+    etag,
+  })
+
+  try {
+    return await upsertTaskRemote(account, collection, metadataTaskItem(), metadataDoc)
+  } catch (error) {
+    const isPreconditionFailure =
+      error instanceof Error && error.message.includes('Task save failed (412)')
+
+    if (!isPreconditionFailure) {
+      throw error
+    }
+
+    const latestEtag = await fetchResourceEtag(url, authHeader(account.username, account.password))
+    return upsertTaskRemote(account, collection, metadataTaskItem(latestEtag), metadataDoc)
+  }
 }
 
 export async function upsertSmartListRemote(

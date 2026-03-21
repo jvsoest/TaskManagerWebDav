@@ -32,6 +32,9 @@ type ActiveView =
   | { kind: 'collection'; collectionId: string }
   | { kind: 'smart'; smartListId: string }
 
+type WorkspaceMode = 'tasks' | 'settings'
+type SettingsSection = 'accounts' | 'structure' | 'tags'
+
 type TaskDraft = Omit<TaskItem, 'id' | 'uid' | 'createdAt' | 'updatedAt' | 'syncState'> & {
   id?: string
   uid?: string
@@ -238,9 +241,10 @@ function App() {
   const [message, setMessage] = useState('Connect a CalDAV account to start syncing tasks.')
   const [isCreatingTask, setIsCreatingTask] = useState(false)
   const [isSidebarOpen, setIsSidebarOpen] = useState(false)
-  const [isSettingsOpen, setIsSettingsOpen] = useState(false)
   const [isSmartEditorOpen, setIsSmartEditorOpen] = useState(false)
   const [collapsedFolders, setCollapsedFolders] = useState<string[]>([])
+  const [workspaceMode, setWorkspaceMode] = useState<WorkspaceMode>('tasks')
+  const [settingsSection, setSettingsSection] = useState<SettingsSection>('accounts')
   const deliveredRef = useRef<Set<string>>(new Set())
   const deferredSearch = useDeferredValue(searchText)
 
@@ -271,6 +275,7 @@ function App() {
   const metadataDoc =
     snapshot.metadataDocs.find((doc) => doc.accountId === activeAccountId) ??
     (activeAccountId ? createDefaultMetadata(activeAccountId) : undefined)
+  const isSettingsMode = workspaceMode === 'settings'
   const isEditorMode = isCreatingTask || Boolean(selectedTaskId)
   const orderedCollectionIds = useMemo(() => {
     const ids = taskCollections.map((collection) => collection.id)
@@ -406,6 +411,34 @@ function App() {
       unfiled,
     }
   }, [metadataDoc, orderedTaskCollections])
+  const orderedCollectionOptions = useMemo(() => {
+    const options: Array<{ id: string; label: string }> = []
+
+    function appendFolder(folderId: string, depth: number) {
+      const directCollections = folderSections.collectionsByFolder.get(folderId) ?? []
+      const childFolders = folderSections.folderChildren.get(folderId) ?? []
+
+      directCollections.forEach((collection) => {
+        options.push({
+          id: collection.id,
+          label: `${'↳ '.repeat(depth + 1)}${collection.displayName}`,
+        })
+      })
+
+      childFolders.forEach((childFolder) => appendFolder(childFolder.id, depth + 1))
+    }
+
+    folderSections.unfiled.forEach((collection) => {
+      options.push({
+        id: collection.id,
+        label: collection.displayName,
+      })
+    })
+
+    folderSections.rootFolders.forEach((folder) => appendFolder(folder.id, 0))
+
+    return options
+  }, [folderSections])
 
   const currentViewTitle =
     activeView.kind === 'all'
@@ -418,6 +451,10 @@ function App() {
     startTransition(() => setSnapshot(nextSnapshot))
   }
 
+  function replaceSnapshotWith(updater: (current: AppSnapshot) => AppSnapshot) {
+    startTransition(() => setSnapshot((current) => updater(current)))
+  }
+
   function updateAccount(accountId: string, patch: Partial<Account>) {
     replaceSnapshot({
       ...snapshot,
@@ -428,6 +465,7 @@ function App() {
   }
 
   function openTask(taskId: string) {
+    setWorkspaceMode('tasks')
     setSelectedTaskId(taskId)
     setIsCreatingTask(false)
     setIsSidebarOpen(false)
@@ -440,12 +478,23 @@ function App() {
   }
 
   function beginNewTask(prefill = '') {
+    setWorkspaceMode('tasks')
     setSelectedTaskId(undefined)
     setIsCreatingTask(true)
     setTaskDraft({
       ...createDraft(defaultCollectionId, activeAccountId),
       title: prefill,
     })
+  }
+
+  function openSettings(section: SettingsSection = 'accounts') {
+    setWorkspaceMode('settings')
+    setSettingsSection(section)
+    setIsSidebarOpen(false)
+  }
+
+  function closeSettings() {
+    setWorkspaceMode('tasks')
   }
 
   function toggleFolderCollapsed(folderId: string) {
@@ -568,32 +617,31 @@ function App() {
       etag: taskDraft.etag,
     }
 
-    replaceSnapshot({
-      ...snapshot,
-      tasks: [...snapshot.tasks.filter((task) => task.id !== nextTask.id), nextTask],
-    })
-    setSelectedTaskId(nextTask.id)
-    setIsCreatingTask(false)
     setMessage(`Saving ${nextTask.title || 'task'}...`)
 
     try {
+      replaceSnapshotWith((current) => ({
+        ...current,
+        tasks: [...current.tasks.filter((task) => task.id !== nextTask.id), nextTask],
+      }))
       const remote = await upsertTaskRemote(activeAccount, targetCollection, nextTask, metadataDoc)
-      replaceSnapshot({
-        ...snapshot,
+      replaceSnapshotWith((current) => ({
+        ...current,
         tasks: [
-          ...snapshot.tasks.filter((task) => task.id !== nextTask.id),
+          ...current.tasks.filter((task) => task.id !== nextTask.id),
           { ...nextTask, url: remote.url, etag: remote.etag, syncState: 'synced' },
         ],
-      })
+      }))
+      closeEditor()
       setMessage('Task saved to CalDAV.')
     } catch (error) {
-      replaceSnapshot({
-        ...snapshot,
+      replaceSnapshotWith((current) => ({
+        ...current,
         tasks: [
-          ...snapshot.tasks.filter((task) => task.id !== nextTask.id),
+          ...current.tasks.filter((task) => task.id !== nextTask.id),
           { ...nextTask, syncState: 'error' },
         ],
-      })
+      }))
       setMessage(error instanceof Error ? error.message : 'Task save failed.')
     }
   }
@@ -672,24 +720,24 @@ function App() {
       return
     }
 
-    replaceSnapshot({
-      ...snapshot,
-      metadataDocs: [...snapshot.metadataDocs.filter((entry) => entry.accountId !== doc.accountId), doc],
-    })
+    replaceSnapshotWith((current) => ({
+      ...current,
+      metadataDocs: [...current.metadataDocs.filter((entry) => entry.accountId !== doc.accountId), doc],
+    }))
 
     try {
       const remote = await saveMetadataRemote(activeAccount, metadataCollection, doc)
-      replaceSnapshot({
-        ...snapshot,
+      replaceSnapshotWith((current) => ({
+        ...current,
         metadataDocs: [
-          ...snapshot.metadataDocs.filter((entry) => entry.accountId !== doc.accountId),
+          ...current.metadataDocs.filter((entry) => entry.accountId !== doc.accountId),
           {
             ...doc,
             url: remote.url,
             etag: remote.etag,
           },
         ],
-      })
+      }))
       setMessage(successMessage)
     } catch (error) {
       setMessage(error instanceof Error ? error.message : 'Metadata save failed.')
@@ -826,7 +874,7 @@ function App() {
     try {
       await deleteTaskCollection(activeAccount, collection)
 
-      const nextMetadataDoc = metadataDoc
+      let nextMetadataDoc = metadataDoc
         ? {
             ...metadataDoc,
             collectionFolders: Object.fromEntries(
@@ -837,18 +885,23 @@ function App() {
           }
         : undefined
 
-      replaceSnapshot({
-        ...snapshot,
-        collections: snapshot.collections.filter((entry) => entry.id !== collectionId),
-        tasks: snapshot.tasks.filter((task) => task.collectionId !== collectionId),
-        metadataDocs: nextMetadataDoc
-          ? [...snapshot.metadataDocs.filter((entry) => entry.accountId !== nextMetadataDoc.accountId), nextMetadataDoc]
-          : snapshot.metadataDocs,
-      })
-
-      if (metadataDoc) {
-        await saveMetadataRemote(activeAccount, metadataCollection!, nextMetadataDoc!)
+      if (nextMetadataDoc) {
+        const remote = await saveMetadataRemote(activeAccount, metadataCollection!, nextMetadataDoc!)
+        nextMetadataDoc = {
+          ...nextMetadataDoc,
+          url: remote.url,
+          etag: remote.etag,
+        }
       }
+
+      replaceSnapshotWith((current) => ({
+        ...current,
+        collections: current.collections.filter((entry) => entry.id !== collectionId),
+        tasks: current.tasks.filter((task) => task.collectionId !== collectionId),
+        metadataDocs: nextMetadataDoc
+          ? [...current.metadataDocs.filter((entry) => entry.accountId !== nextMetadataDoc.accountId), nextMetadataDoc]
+          : current.metadataDocs,
+      }))
 
       if (activeView.kind === 'collection' && activeView.collectionId === collectionId) {
         setActiveView({ kind: 'all' })
@@ -1008,14 +1061,61 @@ function App() {
     )
   }
 
-  function handleQuickAdd() {
+  async function handleQuickAdd() {
+    if (!activeAccount || !metadataDoc || taskCollections.length === 0) {
+      setMessage('Connect an account with at least one task list before adding tasks.')
+      return
+    }
+
     if (!quickAddTitle.trim()) {
       beginNewTask()
       return
     }
 
-    beginNewTask(quickAddTitle.trim())
+    const targetCollection = taskCollections[0]
+    const now = new Date().toISOString()
+    const nextTask: TaskItem = {
+      id: newId(),
+      uid: newId().replace(/-/g, ''),
+      accountId: activeAccount.id,
+      collectionId: targetCollection.id,
+      title: quickAddTitle.trim(),
+      notes: '',
+      status: 'needs-action',
+      priority: 1,
+      tagIds: [],
+      createdAt: now,
+      updatedAt: now,
+      syncState: 'syncing',
+    }
+
     setQuickAddTitle('')
+    setMessage(`Saving ${nextTask.title}...`)
+
+    try {
+      replaceSnapshotWith((current) => ({
+        ...current,
+        tasks: [...current.tasks.filter((task) => task.id !== nextTask.id), nextTask],
+      }))
+      const remote = await upsertTaskRemote(activeAccount, targetCollection, nextTask, metadataDoc)
+      replaceSnapshotWith((current) => ({
+        ...current,
+        tasks: [
+          ...current.tasks.filter((task) => task.id !== nextTask.id),
+          { ...nextTask, url: remote.url, etag: remote.etag, syncState: 'synced' },
+        ],
+      }))
+      setMessage('Task added.')
+    } catch (error) {
+      replaceSnapshotWith((current) => ({
+        ...current,
+        tasks: [
+          ...current.tasks.filter((task) => task.id !== nextTask.id),
+          { ...nextTask, syncState: 'error' },
+        ],
+      }))
+      setMessage(error instanceof Error ? error.message : 'Quick add failed.')
+    }
   }
 
   function editSmartList(smartList: SmartList) {
@@ -1069,6 +1169,75 @@ function App() {
     )
   }
 
+  function renderSettingsCollectionRow(collection: (typeof orderedTaskCollections)[number], depth: number) {
+    return (
+      <div key={collection.id} className={`assign-row structure-row depth-${Math.min(depth, 3)}`}>
+        <span>{collection.displayName}</span>
+        <div className="assign-actions">
+          <select
+            value={metadataDoc?.collectionFolders[collection.id] ?? ''}
+            onChange={(event) =>
+              void handleAssignCollectionFolder(collection.id, event.target.value || undefined)
+            }
+          >
+            <option value="">Unfiled</option>
+            {folderTreeOptions.map((folderOption) => (
+              <option key={folderOption.id} value={folderOption.id}>
+                {folderOption.label}
+              </option>
+            ))}
+          </select>
+          <button className="ghost-button" onClick={() => void handleReorderTaskList(collection.id, 'up')}>
+            Up
+          </button>
+          <button className="ghost-button" onClick={() => void handleReorderTaskList(collection.id, 'down')}>
+            Down
+          </button>
+          <button className="ghost-button danger" onClick={() => void handleDeleteTaskList(collection.id)}>
+            Delete
+          </button>
+        </div>
+      </div>
+    )
+  }
+
+  function renderSettingsFolderTree(folderId: string, depth = 0): React.JSX.Element | null {
+    const folder = (metadataDoc?.folderNodes ?? []).find((entry) => entry.id === folderId)
+    if (!folder) {
+      return null
+    }
+
+    const directCollections = folderSections.collectionsByFolder.get(folder.id) ?? []
+    const childFolders = folderSections.folderChildren.get(folder.id) ?? []
+
+    return (
+      <div key={folder.id} className="structure-branch">
+        <div className={`simple-row structure-row depth-${Math.min(depth, 3)}`}>
+          <div>
+            <strong>{folder.name}</strong>
+            <span>{folder.parentId ? `inside ${folderNameById.get(folder.parentId)}` : 'root'}</span>
+          </div>
+          <div className="row-control-group">
+            <button className="ghost-button" onClick={() => void handleReorderFolder(folder.id, 'up')}>
+              Up
+            </button>
+            <button className="ghost-button" onClick={() => void handleReorderFolder(folder.id, 'down')}>
+              Down
+            </button>
+            <button className="ghost-button danger" onClick={() => void handleDeleteFolder(folder.id)}>
+              Delete
+            </button>
+          </div>
+        </div>
+
+        <div className="structure-children">
+          {directCollections.map((collection) => renderSettingsCollectionRow(collection, depth + 1))}
+          {childFolders.map((childFolder) => renderSettingsFolderTree(childFolder.id, depth + 1))}
+        </div>
+      </div>
+    )
+  }
+
   return (
     <div className="todoist-shell">
       <aside className={`todoist-sidebar ${isSidebarOpen ? 'open' : ''}`}>
@@ -1109,7 +1278,7 @@ function App() {
           <div className="sidebar-group">
             <div className="sidebar-group-title">
               <span>Lists</span>
-              <button className="ghost-inline" onClick={() => setIsSettingsOpen(true)}>
+              <button className="ghost-inline" onClick={() => openSettings('structure')}>
                 Manage
               </button>
             </div>
@@ -1171,7 +1340,7 @@ function App() {
         </nav>
 
         <div className="sidebar-footer">
-          <button className="account-switcher" onClick={() => setIsSettingsOpen(true)}>
+          <button className="account-switcher" onClick={() => openSettings('accounts')}>
             <div>
               <strong>{activeAccount?.label ?? 'No account'}</strong>
               <span>{activeAccount ? syncLabel(activeAccount.lastSyncAt) : 'Connect a CalDAV account'}</span>
@@ -1191,26 +1360,289 @@ function App() {
             </button>
             <div>
               <p>{activeAccount ? activeAccount.displayName || activeAccount.label : 'No connected account'}</p>
-              <h2>{isEditorMode ? (taskDraft.id ? 'Edit task' : 'New task') : currentViewTitle}</h2>
+              <h2>
+                {isSettingsMode
+                  ? 'Settings'
+                  : isEditorMode
+                    ? (taskDraft.id ? 'Edit task' : 'New task')
+                    : currentViewTitle}
+              </h2>
             </div>
           </div>
-          <div className="workspace-actions">
-            <button className="ghost-button" onClick={() => void handleNotifications()}>
-              Reminders
-            </button>
-            <button className="ghost-button" onClick={() => setIsSettingsOpen(true)}>
-              Settings
-            </button>
-            <button className="ghost-button" onClick={() => setIsSmartEditorOpen(true)} disabled={!activeAccount}>
-              Smart list
-            </button>
-            <button className="primary-button" onClick={() => void handleSyncAccount()} disabled={!activeAccount || busy}>
-              {busy ? 'Working...' : 'Sync'}
-            </button>
-          </div>
+          {isSettingsMode ? (
+            <div className="workspace-actions">
+              <button className="ghost-button" onClick={closeSettings}>
+                Back to tasks
+              </button>
+            </div>
+          ) : (
+            <div className="workspace-actions">
+              <button className="ghost-button" onClick={() => void handleNotifications()}>
+                Reminders
+              </button>
+              <button className="ghost-button" onClick={() => openSettings('accounts')}>
+                Settings
+              </button>
+              <button className="ghost-button" onClick={() => setIsSmartEditorOpen(true)} disabled={!activeAccount}>
+                Smart list
+              </button>
+              <button className="primary-button" onClick={() => void handleSyncAccount()} disabled={!activeAccount || busy}>
+                {busy ? 'Working...' : 'Sync'}
+              </button>
+            </div>
+          )}
         </header>
 
-        {!isEditorMode ? (
+        {isSettingsMode ? (
+          <section className="workspace-surface settings-page">
+            <div className="settings-layout">
+              <aside className="settings-nav">
+                <button
+                  className={`settings-nav-button ${settingsSection === 'accounts' ? 'active' : ''}`}
+                  onClick={() => setSettingsSection('accounts')}
+                >
+                  <strong>Accounts</strong>
+                  <span>Connections and sync</span>
+                </button>
+                <button
+                  className={`settings-nav-button ${settingsSection === 'structure' ? 'active' : ''}`}
+                  onClick={() => setSettingsSection('structure')}
+                >
+                  <strong>Folders and lists</strong>
+                  <span>Hierarchy and ordering</span>
+                </button>
+                <button
+                  className={`settings-nav-button ${settingsSection === 'tags' ? 'active' : ''}`}
+                  onClick={() => setSettingsSection('tags')}
+                >
+                  <strong>Tags</strong>
+                  <span>Nested tag structure</span>
+                </button>
+              </aside>
+
+              <div className="settings-panel">
+                {settingsSection === 'accounts' && (
+                  <section className="settings-page-section">
+                    <div className="settings-page-header">
+                      <div>
+                        <p>Window 1 of 3</p>
+                        <h3>Accounts</h3>
+                      </div>
+                      <button
+                        className="ghost-button"
+                        onClick={() => void handleSyncAccount()}
+                        disabled={!activeAccount || busy}
+                      >
+                        Sync
+                      </button>
+                    </div>
+
+                    <div className="stack-list">
+                      {snapshot.accounts.map((account) => (
+                        <button
+                          key={account.id}
+                          className={`account-switcher ${account.id === activeAccountId ? 'active' : ''}`}
+                          onClick={() => setActiveAccountId(account.id)}
+                        >
+                          <div>
+                            <strong>{account.label}</strong>
+                            <span>{syncLabel(account.lastSyncAt)}</span>
+                          </div>
+                          <span>{account.syncState}</span>
+                        </button>
+                      ))}
+                    </div>
+
+                    <div className="settings-form">
+                      <input
+                        value={connectionForm.label}
+                        onChange={(event) =>
+                          setConnectionForm((current) => ({ ...current, label: event.target.value }))
+                        }
+                        placeholder="Label"
+                      />
+                      <input
+                        value={connectionForm.serverUrl}
+                        onChange={(event) =>
+                          setConnectionForm((current) => ({ ...current, serverUrl: event.target.value }))
+                        }
+                        placeholder="Server URL"
+                      />
+                      <input
+                        value={connectionForm.username}
+                        onChange={(event) =>
+                          setConnectionForm((current) => ({ ...current, username: event.target.value }))
+                        }
+                        placeholder="Username"
+                      />
+                      <input
+                        type="password"
+                        value={connectionForm.password}
+                        onChange={(event) =>
+                          setConnectionForm((current) => ({ ...current, password: event.target.value }))
+                        }
+                        placeholder="Password or token"
+                      />
+                      <button className="primary-button" onClick={() => void handleConnectAccount()} disabled={busy}>
+                        Connect account
+                      </button>
+                    </div>
+                  </section>
+                )}
+
+                {settingsSection === 'structure' && (
+                  <section className="settings-page-section">
+                    <div className="settings-page-header">
+                      <div>
+                        <p>Window 2 of 3</p>
+                        <h3>Folders and task lists</h3>
+                      </div>
+                    </div>
+
+                    <div className="settings-block">
+                      <div className="section-title-row">
+                        <h4>Create list</h4>
+                      </div>
+                      <div className="settings-form split">
+                        <input
+                          value={listDraft.name}
+                          onChange={(event) => setListDraft((current) => ({ ...current, name: event.target.value }))}
+                          placeholder="New task list"
+                        />
+                        <select
+                          value={listDraft.folderId}
+                          onChange={(event) =>
+                            setListDraft((current) => ({ ...current, folderId: event.target.value }))
+                          }
+                        >
+                          <option value="">Create as unfiled</option>
+                          {folderTreeOptions.map((folderOption) => (
+                            <option key={folderOption.id} value={folderOption.id}>
+                              {folderOption.label}
+                            </option>
+                          ))}
+                        </select>
+                        <button
+                          className="ghost-button"
+                          onClick={() => void handleCreateTaskList()}
+                          disabled={!activeAccount || busy}
+                        >
+                          Add list
+                        </button>
+                      </div>
+                    </div>
+
+                    <div className="settings-block">
+                      <div className="section-title-row">
+                        <h4>Create folder</h4>
+                      </div>
+                      <div className="settings-form split">
+                        <input
+                          value={folderDraft.name}
+                          onChange={(event) => setFolderDraft((current) => ({ ...current, name: event.target.value }))}
+                          placeholder="New folder"
+                        />
+                        <select
+                          value={folderDraft.parentId}
+                          onChange={(event) =>
+                            setFolderDraft((current) => ({ ...current, parentId: event.target.value }))
+                          }
+                        >
+                          <option value="">Root</option>
+                          {folderTreeOptions.map((folderOption) => (
+                            <option key={folderOption.id} value={folderOption.id}>
+                              {folderOption.label}
+                            </option>
+                          ))}
+                        </select>
+                        <button className="ghost-button" onClick={() => void handleAddFolder()} disabled={!activeAccount}>
+                          Add folder
+                        </button>
+                      </div>
+                    </div>
+
+                    <div className="settings-block">
+                      <div className="section-title-row">
+                        <h4>Structure overview</h4>
+                      </div>
+                      <div className="structure-overview">
+                        {folderSections.unfiled.length > 0 && (
+                          <div className="structure-group">
+                            <div className="structure-group-label">Unfiled</div>
+                            <div className="structure-children">
+                              {folderSections.unfiled.map((collection) => renderSettingsCollectionRow(collection, 1))}
+                            </div>
+                          </div>
+                        )}
+
+                        {folderSections.rootFolders.map((folder) => renderSettingsFolderTree(folder.id))}
+
+                        {folderSections.unfiled.length === 0 && folderSections.rootFolders.length === 0 && (
+                          <div className="empty-state">
+                            <strong>No folders or task lists yet.</strong>
+                            <span>Create a folder or add a task list above.</span>
+                          </div>
+                        )}
+                      </div>
+                    </div>
+                  </section>
+                )}
+
+                {settingsSection === 'tags' && (
+                  <section className="settings-page-section">
+                    <div className="settings-page-header">
+                      <div>
+                        <p>Window 3 of 3</p>
+                        <h3>Tags</h3>
+                      </div>
+                    </div>
+
+                    <div className="stack-list">
+                      {tagTreeOptions.map((tagOption) => (
+                        <div key={tagOption.id} className="simple-row">
+                          <div>
+                            <strong>{`${tagOption.depth > 0 ? `${'↳ '.repeat(tagOption.depth)}` : ''}#${tagOption.node.name}`}</strong>
+                            <span>{tagOption.node.parentId ? `inside #${tagNameById.get(tagOption.node.parentId)}` : 'root'}</span>
+                          </div>
+                          <div className="row-control-group">
+                            <button className="ghost-button" onClick={() => void handleReorderTag(tagOption.id, 'up')}>
+                              Up
+                            </button>
+                            <button className="ghost-button" onClick={() => void handleReorderTag(tagOption.id, 'down')}>
+                              Down
+                            </button>
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+
+                    <div className="settings-form split">
+                      <input
+                        value={tagDraft.name}
+                        onChange={(event) => setTagDraft((current) => ({ ...current, name: event.target.value }))}
+                        placeholder="New tag"
+                      />
+                      <select
+                        value={tagDraft.parentId}
+                        onChange={(event) => setTagDraft((current) => ({ ...current, parentId: event.target.value }))}
+                      >
+                        <option value="">Root</option>
+                        {tagTreeOptions.map((tagOption) => (
+                          <option key={tagOption.id} value={tagOption.id}>
+                            {`${tagOption.depth > 0 ? `${'↳ '.repeat(tagOption.depth)}` : ''}#${tagOption.node.name}`}
+                          </option>
+                        ))}
+                      </select>
+                      <button className="ghost-button" onClick={() => void handleAddTag()} disabled={!activeAccount}>
+                        Add tag
+                      </button>
+                    </div>
+                  </section>
+                )}
+              </div>
+            </div>
+          </section>
+        ) : !isEditorMode ? (
           <section className="workspace-surface">
             <div className="list-header">
               <div>
@@ -1317,9 +1749,9 @@ function App() {
                       }
                     >
                       <option value="">Choose a task list</option>
-                      {taskCollections.map((collection) => (
+                      {orderedCollectionOptions.map((collection) => (
                         <option key={collection.id} value={collection.id}>
-                          {collection.displayName}
+                          {collection.label}
                         </option>
                       ))}
                     </select>
@@ -1414,233 +1846,6 @@ function App() {
           {activeAccount && <span>{activeAccount.lastError ?? syncLabel(activeAccount.lastSyncAt)}</span>}
         </footer>
       </main>
-
-      {isSettingsOpen && (
-        <div className="modal-shell" role="dialog" aria-modal="true">
-          <button className="modal-backdrop" onClick={() => setIsSettingsOpen(false)} />
-          <div className="modal-card settings-card">
-            <div className="modal-header">
-              <div>
-                <p>Workspace settings</p>
-                <h3>Accounts and structure</h3>
-              </div>
-              <button className="ghost-icon" onClick={() => setIsSettingsOpen(false)}>
-                x
-              </button>
-            </div>
-
-            <div className="settings-grid">
-              <section className="settings-section">
-                <div className="section-title-row">
-                  <h4>Accounts</h4>
-                  <button className="ghost-button" onClick={() => void handleSyncAccount()} disabled={!activeAccount || busy}>
-                    Sync
-                  </button>
-                </div>
-                <div className="stack-list">
-                  {snapshot.accounts.map((account) => (
-                    <button
-                      key={account.id}
-                      className={`account-switcher ${account.id === activeAccountId ? 'active' : ''}`}
-                      onClick={() => setActiveAccountId(account.id)}
-                    >
-                      <div>
-                        <strong>{account.label}</strong>
-                        <span>{syncLabel(account.lastSyncAt)}</span>
-                      </div>
-                      <span>{account.syncState}</span>
-                    </button>
-                  ))}
-                </div>
-
-                <div className="settings-form">
-                  <input
-                    value={connectionForm.label}
-                    onChange={(event) =>
-                      setConnectionForm((current) => ({ ...current, label: event.target.value }))
-                    }
-                    placeholder="Label"
-                  />
-                  <input
-                    value={connectionForm.serverUrl}
-                    onChange={(event) =>
-                      setConnectionForm((current) => ({ ...current, serverUrl: event.target.value }))
-                    }
-                    placeholder="Server URL"
-                  />
-                  <input
-                    value={connectionForm.username}
-                    onChange={(event) =>
-                      setConnectionForm((current) => ({ ...current, username: event.target.value }))
-                    }
-                    placeholder="Username"
-                  />
-                  <input
-                    type="password"
-                    value={connectionForm.password}
-                    onChange={(event) =>
-                      setConnectionForm((current) => ({ ...current, password: event.target.value }))
-                    }
-                    placeholder="Password or token"
-                  />
-                  <button className="primary-button" onClick={() => void handleConnectAccount()} disabled={busy}>
-                    Connect account
-                  </button>
-                </div>
-              </section>
-
-              <section className="settings-section">
-                <div className="section-title-row">
-                  <h4>Folders and list placement</h4>
-                </div>
-                <div className="settings-form split">
-                  <input
-                    value={listDraft.name}
-                    onChange={(event) => setListDraft((current) => ({ ...current, name: event.target.value }))}
-                    placeholder="New task list"
-                  />
-                  <select
-                    value={listDraft.folderId}
-                    onChange={(event) =>
-                      setListDraft((current) => ({ ...current, folderId: event.target.value }))
-                    }
-                  >
-                    <option value="">Create as unfiled</option>
-                    {folderTreeOptions.map((folderOption) => (
-                      <option key={folderOption.id} value={folderOption.id}>
-                        {folderOption.label}
-                      </option>
-                    ))}
-                  </select>
-                  <button className="ghost-button" onClick={() => void handleCreateTaskList()} disabled={!activeAccount || busy}>
-                    Add list
-                  </button>
-                </div>
-                <div className="stack-list">
-                  {folderTreeOptions.map((folderOption) => (
-                    <div key={folderOption.id} className="simple-row">
-                      <div>
-                        <strong>{folderOption.label}</strong>
-                        <span>{folderOption.node.parentId ? `inside ${folderNameById.get(folderOption.node.parentId)}` : 'root'}</span>
-                      </div>
-                      <div className="row-control-group">
-                        <button className="ghost-button" onClick={() => void handleReorderFolder(folderOption.id, 'up')}>
-                          Up
-                        </button>
-                        <button className="ghost-button" onClick={() => void handleReorderFolder(folderOption.id, 'down')}>
-                          Down
-                        </button>
-                        <button className="ghost-button danger" onClick={() => void handleDeleteFolder(folderOption.id)}>
-                          Delete
-                        </button>
-                      </div>
-                    </div>
-                  ))}
-                </div>
-                <div className="settings-form split">
-                  <input
-                    value={folderDraft.name}
-                    onChange={(event) => setFolderDraft((current) => ({ ...current, name: event.target.value }))}
-                    placeholder="New folder"
-                  />
-                  <select
-                    value={folderDraft.parentId}
-                    onChange={(event) =>
-                      setFolderDraft((current) => ({ ...current, parentId: event.target.value }))
-                    }
-                  >
-                    <option value="">Root</option>
-                    {folderTreeOptions.map((folderOption) => (
-                      <option key={folderOption.id} value={folderOption.id}>
-                        {folderOption.label}
-                      </option>
-                    ))}
-                  </select>
-                  <button className="ghost-button" onClick={() => void handleAddFolder()} disabled={!activeAccount}>
-                    Add folder
-                  </button>
-                </div>
-                <div className="stack-list">
-                  {orderedTaskCollections.map((collection) => (
-                    <div key={collection.id} className="assign-row">
-                      <span>{collection.displayName}</span>
-                      <div className="assign-actions">
-                        <select
-                          value={metadataDoc?.collectionFolders[collection.id] ?? ''}
-                          onChange={(event) =>
-                            void handleAssignCollectionFolder(collection.id, event.target.value || undefined)
-                          }
-                        >
-                          <option value="">Unfiled</option>
-                          {folderTreeOptions.map((folderOption) => (
-                            <option key={folderOption.id} value={folderOption.id}>
-                              {folderOption.label}
-                            </option>
-                          ))}
-                        </select>
-                        <button className="ghost-button" onClick={() => void handleReorderTaskList(collection.id, 'up')}>
-                          Up
-                        </button>
-                        <button className="ghost-button" onClick={() => void handleReorderTaskList(collection.id, 'down')}>
-                          Down
-                        </button>
-                        <button className="ghost-button danger" onClick={() => void handleDeleteTaskList(collection.id)}>
-                          Delete
-                        </button>
-                      </div>
-                    </div>
-                  ))}
-                </div>
-              </section>
-
-              <section className="settings-section">
-                <div className="section-title-row">
-                  <h4>Tags</h4>
-                </div>
-                <div className="stack-list">
-                  {tagTreeOptions.map((tagOption) => (
-                    <div key={tagOption.id} className="simple-row">
-                      <div>
-                        <strong>{`${tagOption.depth > 0 ? `${'↳ '.repeat(tagOption.depth)}` : ''}#${tagOption.node.name}`}</strong>
-                        <span>{tagOption.node.parentId ? `inside #${tagNameById.get(tagOption.node.parentId)}` : 'root'}</span>
-                      </div>
-                      <div className="row-control-group">
-                        <button className="ghost-button" onClick={() => void handleReorderTag(tagOption.id, 'up')}>
-                          Up
-                        </button>
-                        <button className="ghost-button" onClick={() => void handleReorderTag(tagOption.id, 'down')}>
-                          Down
-                        </button>
-                      </div>
-                    </div>
-                  ))}
-                </div>
-                <div className="settings-form split">
-                  <input
-                    value={tagDraft.name}
-                    onChange={(event) => setTagDraft((current) => ({ ...current, name: event.target.value }))}
-                    placeholder="New tag"
-                  />
-                  <select
-                    value={tagDraft.parentId}
-                    onChange={(event) => setTagDraft((current) => ({ ...current, parentId: event.target.value }))}
-                  >
-                    <option value="">Root</option>
-                    {tagTreeOptions.map((tagOption) => (
-                      <option key={tagOption.id} value={tagOption.id}>
-                        {`${tagOption.depth > 0 ? `${'↳ '.repeat(tagOption.depth)}` : ''}#${tagOption.node.name}`}
-                      </option>
-                    ))}
-                  </select>
-                  <button className="ghost-button" onClick={() => void handleAddTag()} disabled={!activeAccount}>
-                    Add tag
-                  </button>
-                </div>
-              </section>
-            </div>
-          </div>
-        </div>
-      )}
 
       {isSmartEditorOpen && (
         <div className="modal-shell" role="dialog" aria-modal="true">

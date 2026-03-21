@@ -110,8 +110,8 @@ button {
 .editor-notes,
 .settings-form input,
 .settings-form select,
-.editor-grid input,
-.editor-grid select {
+.editor-chipfield input,
+.editor-chipfield select {
   width: 100%;
   border: 1px solid var(--line);
   border-radius: 8px;
@@ -123,8 +123,8 @@ button {
 .quick-add-row input,
 .settings-form input,
 .settings-form select,
-.editor-grid input,
-.editor-grid select {
+.editor-chipfield input,
+.editor-chipfield select {
   padding: 10px 12px;
 }
 
@@ -132,8 +132,6 @@ button {
 .sidebar-group,
 .stack-list,
 .task-rows,
-.settings-grid,
-.settings-section,
 .settings-form {
   display: grid;
   gap: 10px;
@@ -607,20 +605,129 @@ button {
   width: min(720px, calc(100vw - 32px));
 }
 
-.settings-grid {
-  grid-template-columns: repeat(3, minmax(0, 1fr));
-  margin-top: 18px;
+.settings-page {
+  background: var(--bg);
 }
 
-.settings-section {
-  padding: 16px;
+.settings-layout {
+  display: grid;
+  grid-template-columns: 240px minmax(0, 1fr);
+  gap: 20px;
+  align-items: start;
+}
+
+.settings-nav {
+  display: grid;
+  gap: 8px;
+  align-self: start;
+  position: sticky;
+  top: 0;
+}
+
+.settings-nav-button {
+  display: grid;
+  gap: 4px;
+  width: 100%;
+  padding: 14px 16px;
   border: 1px solid var(--line);
   border-radius: 12px;
+  background: var(--surface);
+  text-align: left;
+}
+
+.settings-nav-button strong {
+  font-size: 0.94rem;
+}
+
+.settings-nav-button span {
+  color: var(--muted);
+  font-size: 0.83rem;
+}
+
+.settings-nav-button.active {
+  border-color: #f4b5ae;
+  background: #fff5f3;
+}
+
+.settings-panel,
+.settings-page-section,
+.settings-block,
+.structure-overview,
+.structure-branch,
+.structure-children {
+  display: grid;
+  gap: 14px;
+}
+
+.settings-page-section {
+  padding: 20px;
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  background: var(--surface);
+}
+
+.settings-page-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 16px;
+}
+
+.settings-page-header p {
+  margin: 0;
+  color: var(--muted);
+  font-size: 0.8rem;
+}
+
+.settings-page-header h3,
+.settings-block h4 {
+  margin: 4px 0 0;
+}
+
+.settings-block {
+  padding-top: 4px;
+}
+
+.structure-overview {
+  gap: 12px;
+}
+
+.structure-group {
+  display: grid;
+  gap: 8px;
+}
+
+.structure-group-label {
+  padding: 0 2px;
+  color: var(--muted);
+  font-size: 0.78rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.structure-children {
+  gap: 8px;
+}
+
+.structure-row {
   background: var(--surface-muted);
 }
 
-.settings-section h4 {
-  margin: 0;
+.structure-row.depth-0 {
+  margin-left: 0;
+}
+
+.structure-row.depth-1 {
+  margin-left: 18px;
+}
+
+.structure-row.depth-2 {
+  margin-left: 36px;
+}
+
+.structure-row.depth-3 {
+  margin-left: 54px;
 }
 
 .settings-form.split {
@@ -679,11 +786,6 @@ button {
 }
 
 @media (max-width: 1100px) {
-  .settings-grid {
-    grid-template-columns: 1fr;
-  }
-
-  .editor-grid,
   .settings-form.split {
     grid-template-columns: 1fr;
   }
@@ -695,6 +797,15 @@ button {
 
   .editor-chipbar {
     grid-template-columns: 1fr;
+  }
+
+  .settings-layout {
+    grid-template-columns: 1fr;
+  }
+
+  .settings-nav {
+    position: static;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
   }
 }
 
@@ -734,7 +845,8 @@ button {
   .workspace-actions,
   .task-row,
   .task-side,
-  .quick-add-row {
+  .quick-add-row,
+  .settings-page-header {
     grid-template-columns: 1fr;
     flex-direction: column;
     align-items: stretch;
@@ -756,5 +868,13 @@ button {
 
   .quick-add-row {
     display: grid;
+  }
+
+  .settings-nav {
+    grid-template-columns: 1fr;
+  }
+
+  .settings-page-section {
+    padding: 16px;
   }
 }
