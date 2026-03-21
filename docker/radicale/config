@@ -1,0 +1,23 @@
+[server]
+hosts = 0.0.0.0:5232
+
+[auth]
+type = htpasswd
+htpasswd_filename = /etc/radicale/users
+htpasswd_encryption = plain
+
+[rights]
+type = owner_only
+
+[storage]
+filesystem_folder = /data/collections
+
+[logging]
+level = info
+
+[headers]
+Access-Control-Allow-Origin = http://localhost:5173
+Access-Control-Allow-Methods = GET, POST, PUT, PATCH, DELETE, OPTIONS, PROPFIND, REPORT, MKCALENDAR, MKCOL
+Access-Control-Allow-Headers = Authorization, Content-Type, Depth, Destination, If-Match, If-None-Match, Prefer, Origin, X-Requested-With
+Access-Control-Expose-Headers = ETag
+Access-Control-Allow-Credentials = true

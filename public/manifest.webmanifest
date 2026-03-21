@@ -1,0 +1,17 @@
+{
+  "name": "TaskManagerWebDav",
+  "short_name": "TaskManager",
+  "description": "CalDAV-first task manager PWA with nested folders, tags, and smart lists.",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#f6eee4",
+  "theme_color": "#ef6c3d",
+  "icons": [
+    {
+      "src": "/icon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any maskable"
+    }
+  ]
+}
