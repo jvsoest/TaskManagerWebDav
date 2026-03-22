@@ -1349,44 +1349,6 @@ function App() {
         </div>
 
         <nav className="sidebar-nav">
-          <button
-            className={`sidebar-link ${activeView.kind === 'all' ? 'active' : ''}`}
-            onClick={() => {
-              setActiveView({ kind: 'all' })
-              setIsSidebarOpen(false)
-            }}
-          >
-            <span>All tasks</span>
-            <strong>{activeTasks.length}</strong>
-          </button>
-
-          <div className="sidebar-group">
-            <div className="sidebar-group-title">
-              <span>Lists</span>
-              <button className="ghost-inline" onClick={() => openSettings('structure')}>
-                Manage
-              </button>
-            </div>
-
-            {folderSections.unfiled.map((collection) => (
-              <button
-                key={collection.id}
-                className={`sidebar-link ${
-                  activeView.kind === 'collection' && activeView.collectionId === collection.id ? 'active' : ''
-                }`}
-                onClick={() => {
-                  setActiveView({ kind: 'collection', collectionId: collection.id })
-                  setIsSidebarOpen(false)
-                }}
-              >
-                <span>{collection.displayName}</span>
-                <strong>{activeTasks.filter((task) => task.collectionId === collection.id).length}</strong>
-              </button>
-            ))}
-
-            {folderSections.rootFolders.map((folder) => renderFolderTree(folder.id))}
-          </div>
-
           <div className="sidebar-group">
             <div className="sidebar-group-title">
               <span>Smart lists</span>
@@ -1421,6 +1383,33 @@ function App() {
                 </button>
               </div>
             ))}
+          </div>
+
+          <div className="sidebar-group">
+            <div className="sidebar-group-title">
+              <span>Lists</span>
+              <button className="ghost-inline" onClick={() => openSettings('structure')}>
+                Manage
+              </button>
+            </div>
+
+            {folderSections.unfiled.map((collection) => (
+              <button
+                key={collection.id}
+                className={`sidebar-link ${
+                  activeView.kind === 'collection' && activeView.collectionId === collection.id ? 'active' : ''
+                }`}
+                onClick={() => {
+                  setActiveView({ kind: 'collection', collectionId: collection.id })
+                  setIsSidebarOpen(false)
+                }}
+              >
+                <span>{collection.displayName}</span>
+                <strong>{activeTasks.filter((task) => task.collectionId === collection.id).length}</strong>
+              </button>
+            ))}
+
+            {folderSections.rootFolders.map((folder) => renderFolderTree(folder.id))}
           </div>
         </nav>
 
