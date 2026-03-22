@@ -21,6 +21,7 @@ import type {
   FolderNode,
   MetadataDocument,
   SmartList,
+  SyncLogEntry,
   TagNode,
   TaskFilter,
   TaskItem,
@@ -46,6 +47,7 @@ const emptySnapshot: AppSnapshot = {
   tasks: [],
   smartLists: [],
   metadataDocs: [],
+  syncLogs: [],
 }
 
 const emptyConnection: AccountConnectionInput = {
@@ -277,6 +279,14 @@ function App() {
     (activeAccountId ? createDefaultMetadata(activeAccountId) : undefined)
   const isSettingsMode = workspaceMode === 'settings'
   const isEditorMode = isCreatingTask || Boolean(selectedTaskId)
+  const visibleSyncLogs = useMemo(
+    () =>
+      [...snapshot.syncLogs]
+        .filter((entry) => !activeAccountId || !entry.accountId || entry.accountId === activeAccountId)
+        .sort((left, right) => right.createdAt.localeCompare(left.createdAt))
+        .slice(0, 20),
+    [activeAccountId, snapshot.syncLogs],
+  )
   const orderedCollectionIds = useMemo(() => {
     const ids = taskCollections.map((collection) => collection.id)
     const preferred = (metadataDoc?.collectionOrder ?? []).filter((id) => ids.includes(id))
@@ -497,6 +507,21 @@ function App() {
     setWorkspaceMode('tasks')
   }
 
+  function recordSyncIssue(source: string, failure: string, accountId = activeAccountId) {
+    const nextEntry: SyncLogEntry = {
+      id: newId(),
+      accountId,
+      source,
+      message: failure,
+      createdAt: new Date().toISOString(),
+    }
+
+    replaceSnapshotWith((current) => ({
+      ...current,
+      syncLogs: [nextEntry, ...current.syncLogs].slice(0, 50),
+    }))
+  }
+
   function toggleFolderCollapsed(folderId: string) {
     setCollapsedFolders((current) =>
       current.includes(folderId) ? current.filter((id) => id !== folderId) : [...current, folderId],
@@ -537,7 +562,9 @@ function App() {
 
       await handleSyncAccount(account, discovery.collections, true)
     } catch (error) {
-      setMessage(error instanceof Error ? error.message : 'Failed to connect account.')
+      const failure = error instanceof Error ? error.message : 'Failed to connect account.'
+      recordSyncIssue('Account connection', failure, accountId)
+      setMessage(failure)
     } finally {
       setBusy(false)
     }
@@ -577,11 +604,13 @@ function App() {
           ...snapshot.metadataDocs.filter((entry) => entry.accountId !== account.id),
           result.metadataDoc,
         ],
+        syncLogs: snapshot.syncLogs,
       })
       setMessage(isFirstSync ? 'Account connected and synced.' : `${account.label} is up to date.`)
     } catch (error) {
       const failure = error instanceof Error ? error.message : 'Sync failed.'
       updateAccount(account.id, { syncState: 'error', lastError: failure })
+      recordSyncIssue('Account sync', failure, account.id)
       setMessage(failure)
     } finally {
       setBusy(false)
@@ -642,7 +671,9 @@ function App() {
           { ...nextTask, syncState: 'error' },
         ],
       }))
-      setMessage(error instanceof Error ? error.message : 'Task save failed.')
+      const failure = error instanceof Error ? error.message : 'Task save failed.'
+      recordSyncIssue('Task save', failure, activeAccount.id)
+      setMessage(failure)
     }
   }
 
@@ -683,7 +714,9 @@ function App() {
         ...snapshot,
         tasks: [...snapshot.tasks.filter((entry) => entry.id !== task.id), { ...task, syncState: 'error' }],
       })
-      setMessage(error instanceof Error ? error.message : 'Task update failed.')
+      const failure = error instanceof Error ? error.message : 'Task update failed.'
+      recordSyncIssue('Task update', failure, activeAccount.id)
+      setMessage(failure)
     }
   }
 
@@ -711,7 +744,9 @@ function App() {
         ...snapshot,
         tasks: [...snapshot.tasks, { ...existing, syncState: 'error' }],
       })
-      setMessage(error instanceof Error ? error.message : 'Task delete failed.')
+      const failure = error instanceof Error ? error.message : 'Task delete failed.'
+      recordSyncIssue('Task delete', failure, activeAccount.id)
+      setMessage(failure)
     }
   }
 
@@ -740,7 +775,9 @@ function App() {
       }))
       setMessage(successMessage)
     } catch (error) {
-      setMessage(error instanceof Error ? error.message : 'Metadata save failed.')
+      const failure = error instanceof Error ? error.message : 'Metadata save failed.'
+      recordSyncIssue('Metadata sync', failure, activeAccount.id)
+      setMessage(failure)
     }
   }
 
@@ -912,7 +949,9 @@ function App() {
 
       setMessage('Task list deleted.')
     } catch (error) {
-      setMessage(error instanceof Error ? error.message : 'Task list delete failed.')
+      const failure = error instanceof Error ? error.message : 'Task list delete failed.'
+      recordSyncIssue('Task list delete', failure, activeAccount.id)
+      setMessage(failure)
     } finally {
       setBusy(false)
     }
@@ -985,7 +1024,9 @@ function App() {
 
       setListDraft({ name: '', folderId: '' })
     } catch (error) {
-      setMessage(error instanceof Error ? error.message : 'Task list creation failed.')
+      const failure = error instanceof Error ? error.message : 'Task list creation failed.'
+      recordSyncIssue('Task list creation', failure, activeAccount.id)
+      setMessage(failure)
     } finally {
       setBusy(false)
     }
@@ -1025,7 +1066,9 @@ function App() {
       setSmartDraftFilter(defaultFilter())
       setIsSmartEditorOpen(false)
     } catch (error) {
-      setMessage(error instanceof Error ? error.message : 'Smart list save failed.')
+      const failure = error instanceof Error ? error.message : 'Smart list save failed.'
+      recordSyncIssue('Smart list save', failure, activeAccount.id)
+      setMessage(failure)
     }
   }
 
@@ -1043,7 +1086,9 @@ function App() {
       await deleteSmartListRemote(activeAccount, smartList)
       setMessage('Smart list deleted.')
     } catch (error) {
-      setMessage(error instanceof Error ? error.message : 'Smart list delete failed.')
+      const failure = error instanceof Error ? error.message : 'Smart list delete failed.'
+      recordSyncIssue('Smart list delete', failure, activeAccount.id)
+      setMessage(failure)
     }
   }
 
@@ -1152,7 +1197,9 @@ function App() {
           { ...nextTask, syncState: 'error' },
         ],
       }))
-      setMessage(error instanceof Error ? error.message : 'Quick add failed.')
+      const failure = error instanceof Error ? error.message : 'Quick add failed.'
+      recordSyncIssue('Quick add', failure, activeAccount.id)
+      setMessage(failure)
     }
   }
 
@@ -1540,6 +1587,50 @@ function App() {
                             Clear local cache
                           </button>
                         </div>
+                      </div>
+                    </div>
+
+                    <div className="settings-block">
+                      <div className="section-title-row">
+                        <h4>Sync status</h4>
+                      </div>
+                      <div className="stack-list">
+                        <div className="simple-row">
+                          <div>
+                            <strong>{activeAccount ? activeAccount.label : 'No active account'}</strong>
+                            <span>
+                              {activeAccount
+                                ? activeAccount.lastError ?? syncLabel(activeAccount.lastSyncAt)
+                                : 'Connect an account to start syncing.'}
+                            </span>
+                          </div>
+                        </div>
+
+                        {visibleSyncLogs.length === 0 ? (
+                          <div className="simple-row">
+                            <div>
+                              <strong>No recent sync issues</strong>
+                              <span>Only failures are stored here, so successful syncs do not fill up this history.</span>
+                            </div>
+                          </div>
+                        ) : (
+                          visibleSyncLogs.map((entry) => (
+                            <div key={entry.id} className="simple-row">
+                              <div>
+                                <strong>{entry.source}</strong>
+                                <span>
+                                  {new Date(entry.createdAt).toLocaleString()}
+                                  {entry.accountId
+                                    ? ` · ${snapshot.accounts.find((account) => account.id === entry.accountId)?.label ?? 'Account'}`
+                                    : ''}
+                                </span>
+                              </div>
+                              <div>
+                                <span>{entry.message}</span>
+                              </div>
+                            </div>
+                          ))
+                        )}
                       </div>
                     </div>
                   </section>

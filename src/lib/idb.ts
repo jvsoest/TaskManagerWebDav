@@ -1,9 +1,9 @@
 import type { AppSnapshot } from '../types'
 
 const DB_NAME = 'taskmanager-webdav'
-const DB_VERSION = 1
+const DB_VERSION = 2
 
-const STORES = ['accounts', 'collections', 'tasks', 'smartLists', 'metadataDocs'] as const
+const STORES = ['accounts', 'collections', 'tasks', 'smartLists', 'metadataDocs', 'syncLogs'] as const
 
 let openPromise: Promise<IDBDatabase> | undefined
 
@@ -32,6 +32,9 @@ function openDb(): Promise<IDBDatabase> {
       if (!database.objectStoreNames.contains('metadataDocs')) {
         database.createObjectStore('metadataDocs', { keyPath: 'accountId' })
       }
+      if (!database.objectStoreNames.contains('syncLogs')) {
+        database.createObjectStore('syncLogs', { keyPath: 'id' })
+      }
     }
 
     request.onsuccess = () => resolve(request.result)
@@ -58,7 +61,7 @@ function wrapTransaction(transaction: IDBTransaction): Promise<void> {
 
 export async function loadSnapshot(): Promise<AppSnapshot> {
   const db = await openDb()
-  const [accounts, collections, tasks, smartLists, metadataDocs] = await Promise.all(
+  const [accounts, collections, tasks, smartLists, metadataDocs, syncLogs] = await Promise.all(
     STORES.map((storeName) =>
       wrapRequest(db.transaction(storeName, 'readonly').objectStore(storeName).getAll()),
     ),
@@ -70,6 +73,7 @@ export async function loadSnapshot(): Promise<AppSnapshot> {
     tasks,
     smartLists,
     metadataDocs,
+    syncLogs,
   }
 }
 
@@ -81,18 +85,21 @@ export async function saveSnapshot(snapshot: AppSnapshot): Promise<void> {
   const tasks = transaction.objectStore('tasks')
   const smartLists = transaction.objectStore('smartLists')
   const metadataDocs = transaction.objectStore('metadataDocs')
+  const syncLogs = transaction.objectStore('syncLogs')
 
   accounts.clear()
   collections.clear()
   tasks.clear()
   smartLists.clear()
   metadataDocs.clear()
+  syncLogs.clear()
 
   snapshot.accounts.forEach((entry) => accounts.put(entry))
   snapshot.collections.forEach((entry) => collections.put(entry))
   snapshot.tasks.forEach((entry) => tasks.put(entry))
   snapshot.smartLists.forEach((entry) => smartLists.put(entry))
   snapshot.metadataDocs.forEach((entry) => metadataDocs.put(entry))
+  snapshot.syncLogs.forEach((entry) => syncLogs.put(entry))
 
   await wrapTransaction(transaction)
 }

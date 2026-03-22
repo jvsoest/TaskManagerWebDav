@@ -96,12 +96,21 @@ export interface SmartList {
   updatedAt: string
 }
 
+export interface SyncLogEntry {
+  id: string
+  accountId?: string
+  source: string
+  message: string
+  createdAt: string
+}
+
 export interface AppSnapshot {
   accounts: Account[]
   collections: TaskCollection[]
   tasks: TaskItem[]
   smartLists: SmartList[]
   metadataDocs: MetadataDocument[]
+  syncLogs: SyncLogEntry[]
 }
 
 export interface AccountConnectionInput {
