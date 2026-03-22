@@ -1,4 +1,10 @@
-import { createDefaultMetadata, parseFilter, serializeFilter } from './filters'
+import {
+  createDefaultMetadata,
+  defaultSmartListOrdering,
+  normalizeOrdering,
+  parseSmartListPayload,
+  serializeSmartListPayload,
+} from './filters'
 import type {
   Account,
   AccountConnectionInput,
@@ -616,6 +622,18 @@ function serializeMetadataDocument(doc: MetadataDocument, taskCollections: TaskC
       ]),
     ),
     collectionOrder: doc.collectionOrder.map((collectionId) => collectionUrlById.get(collectionId) ?? collectionId),
+    taskListOrderings: Object.fromEntries(
+      Object.entries(doc.taskListOrderings).map(([collectionId, ordering]) => [
+        collectionUrlById.get(collectionId) ?? collectionId,
+        ordering,
+      ]),
+    ),
+    manualTaskOrder: Object.fromEntries(
+      Object.entries(doc.manualTaskOrder).map(([collectionId, taskIds]) => [
+        collectionUrlById.get(collectionId) ?? collectionId,
+        taskIds,
+      ]),
+    ),
   }
 
   return JSON.stringify(serializedDoc, null, 2)
@@ -681,12 +699,26 @@ function normalizeMetadataDocument(
     const collectionId = collectionIdByRef.get(extractCollectionRef(storedCollectionRef))
     return collectionId ? [collectionId] : []
   })
+  const normalizedTaskListOrderings = Object.fromEntries(
+    Object.entries(rawDoc.taskListOrderings ?? {}).flatMap(([storedCollectionRef, ordering]) => {
+      const collectionId = collectionIdByRef.get(extractCollectionRef(storedCollectionRef))
+      return collectionId ? [[collectionId, normalizeOrdering(ordering, { mode: 'manual', field: 'dueDate', direction: 'asc' })]] : []
+    }),
+  )
+  const normalizedManualTaskOrder = Object.fromEntries(
+    Object.entries(rawDoc.manualTaskOrder ?? {}).flatMap(([storedCollectionRef, taskIds]) => {
+      const collectionId = collectionIdByRef.get(extractCollectionRef(storedCollectionRef))
+      return collectionId ? [[collectionId, taskIds ?? []]] : []
+    }),
+  )
 
   return {
     ...rawDoc,
     accountId,
     collectionFolders: normalizedCollectionFolders,
     collectionOrder: normalizedCollectionOrder,
+    taskListOrderings: normalizedTaskListOrderings,
+    manualTaskOrder: normalizedManualTaskOrder,
     url,
     etag,
   }
@@ -699,7 +731,7 @@ function smartListTask(smartList: SmartList, collectionId: string): TaskItem {
     accountId: smartList.accountId,
     collectionId,
     title: smartList.name,
-    notes: serializeFilter(smartList.filter),
+    notes: serializeSmartListPayload(smartList),
     status: 'needs-action',
     priority: 0,
     createdAt: smartList.updatedAt,
@@ -806,12 +838,14 @@ export async function syncAccount(account: Account, collections: TaskCollection[
       if (!task) {
         return entries
       }
+      const parsedPayload = parseSmartListPayload(task.notes)
 
       entries.push({
         id: task.id,
         accountId: task.accountId,
         name: task.title,
-        filter: parseFilter(task.notes),
+        filter: parsedPayload.filter,
+        ordering: parsedPayload.ordering ?? defaultSmartListOrdering(),
         url: entry.href,
         etag: entry.etag,
         syncState: 'synced' as const,

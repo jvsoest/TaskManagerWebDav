@@ -1,6 +1,15 @@
-import { startTransition, useDeferredValue, useEffect, useMemo, useRef, useState } from 'react'
+import { startTransition, useCallback, useDeferredValue, useEffect, useMemo, useRef, useState } from 'react'
 import './App.css'
-import { createDefaultMetadata, defaultFilter, getSmartListCount, taskMatchesFilter } from './lib/filters'
+import {
+  createDefaultMetadata,
+  defaultFilter,
+  defaultSmartListOrdering,
+  defaultTaskListOrdering,
+  getSmartListCount,
+  normalizeOrdering,
+  sortTasks,
+  taskMatchesFilter,
+} from './lib/filters'
 import { clearLocalCache, loadSnapshot, saveSnapshot } from './lib/idb'
 import { notifyDueTasks, requestNotifications } from './lib/notifications'
 import {
@@ -21,10 +30,13 @@ import type {
   FolderNode,
   MetadataDocument,
   SmartList,
+  SortDirection,
   SyncLogEntry,
   TagNode,
   TaskFilter,
   TaskItem,
+  TaskOrderField,
+  TaskOrdering,
   TaskStatus,
 } from './types'
 
@@ -39,6 +51,16 @@ type SettingsSection = 'accounts' | 'structure' | 'tags'
 type TaskDraft = Omit<TaskItem, 'id' | 'uid' | 'createdAt' | 'updatedAt' | 'syncState'> & {
   id?: string
   uid?: string
+}
+
+type DragSession = {
+  taskId: string
+  pointerX: number
+  pointerY: number
+  offsetX: number
+  offsetY: number
+  width: number
+  height: number
 }
 
 const emptySnapshot: AppSnapshot = {
@@ -58,6 +80,19 @@ const emptyConnection: AccountConnectionInput = {
 }
 
 const statuses: TaskStatus[] = ['needs-action', 'in-process', 'completed', 'cancelled']
+const orderingFields: Array<{ value: TaskOrderField; label: string }> = [
+  { value: 'dueDate', label: 'Due date' },
+  { value: 'startDate', label: 'Start date' },
+  { value: 'priority', label: 'Priority' },
+  { value: 'title', label: 'Title' },
+  { value: 'createdAt', label: 'Created' },
+  { value: 'updatedAt', label: 'Updated' },
+  { value: 'status', label: 'Status' },
+]
+const sortDirections: Array<{ value: SortDirection; label: string }> = [
+  { value: 'asc', label: 'Ascending' },
+  { value: 'desc', label: 'Descending' },
+]
 
 function createDraft(collectionId?: string, accountId?: string): TaskDraft {
   return {
@@ -138,6 +173,19 @@ function moveInArray<T>(items: T[], fromIndex: number, toIndex: number): T[] {
   const next = [...items]
   const [moved] = next.splice(fromIndex, 1)
   next.splice(toIndex, 0, moved)
+  return next
+}
+
+function moveTaskIdToIndex(items: string[], taskId: string, targetIndex: number): string[] {
+  const fromIndex = items.indexOf(taskId)
+  if (fromIndex < 0) {
+    return items
+  }
+
+  const next = [...items]
+  next.splice(fromIndex, 1)
+  const insertIndex = Math.max(0, Math.min(targetIndex, next.length))
+  next.splice(insertIndex, 0, taskId)
   return next
 }
 
@@ -237,6 +285,7 @@ function App() {
   const [smartDraftId, setSmartDraftId] = useState<string>()
   const [smartDraftName, setSmartDraftName] = useState('')
   const [smartDraftFilter, setSmartDraftFilter] = useState<TaskFilter>(defaultFilter())
+  const [smartDraftOrdering, setSmartDraftOrdering] = useState<TaskOrdering>(defaultSmartListOrdering())
   const [searchText, setSearchText] = useState('')
   const [quickAddTitle, setQuickAddTitle] = useState('')
   const [busy, setBusy] = useState(false)
@@ -245,9 +294,12 @@ function App() {
   const [isSidebarOpen, setIsSidebarOpen] = useState(false)
   const [isSmartEditorOpen, setIsSmartEditorOpen] = useState(false)
   const [collapsedFolders, setCollapsedFolders] = useState<string[]>([])
+  const [dragSession, setDragSession] = useState<DragSession>()
+  const [dropIndex, setDropIndex] = useState<number>()
   const [workspaceMode, setWorkspaceMode] = useState<WorkspaceMode>('tasks')
   const [settingsSection, setSettingsSection] = useState<SettingsSection>('accounts')
   const deliveredRef = useRef<Set<string>>(new Set())
+  const taskRowsRef = useRef<Map<string, HTMLDivElement>>(new Map())
   const deferredSearch = useDeferredValue(searchText)
 
   useEffect(() => {
@@ -353,6 +405,35 @@ function App() {
     return () => window.clearInterval(interval)
   }, [activeAccountId, snapshot.tasks])
 
+  const activeSmartList = useMemo(
+    () =>
+      activeView.kind === 'smart'
+        ? activeSmartLists.find((entry) => entry.id === activeView.smartListId)
+        : undefined,
+    [activeSmartLists, activeView],
+  )
+  const currentTaskListOrdering = useMemo(
+    () =>
+      activeView.kind === 'collection'
+        ? normalizeOrdering(metadataDoc?.taskListOrderings[activeView.collectionId], defaultTaskListOrdering())
+        : defaultTaskListOrdering(),
+    [activeView, metadataDoc?.taskListOrderings],
+  )
+  const currentOrdering = useMemo(
+    () =>
+      activeView.kind === 'smart'
+        ? normalizeOrdering(activeSmartList?.ordering, defaultSmartListOrdering())
+        : activeView.kind === 'collection'
+          ? currentTaskListOrdering
+          : {
+              mode: 'property' as const,
+              field: 'dueDate' as const,
+              direction: 'asc' as const,
+            },
+    [activeSmartList?.ordering, activeView, currentTaskListOrdering],
+  )
+  const canManualReorderTasks = activeView.kind === 'collection' && currentOrdering.mode === 'manual'
+
   const visibleTasks = useMemo(() => {
     let tasks = activeTasks
 
@@ -361,10 +442,9 @@ function App() {
     }
 
     if (activeView.kind === 'smart') {
-      const smartList = activeSmartLists.find((entry) => entry.id === activeView.smartListId)
-      if (smartList && metadataDoc) {
+      if (activeSmartList && metadataDoc) {
         tasks = tasks.filter((task) =>
-          taskMatchesFilter(task, smartList.filter, metadataDoc, taskCollections),
+          taskMatchesFilter(task, activeSmartList.filter, metadataDoc, taskCollections),
         )
       }
     }
@@ -374,14 +454,30 @@ function App() {
       tasks = tasks.filter((task) => taskMatchesFilter(task, searchFilter, metadataDoc, taskCollections))
     }
 
-    return [...tasks].sort((left, right) => {
-      if (left.status !== right.status) {
-        return left.status === 'completed' ? 1 : -1
-      }
+    const manualTaskIds =
+      activeView.kind === 'collection' && currentOrdering.mode === 'manual'
+        ? metadataDoc?.manualTaskOrder[activeView.collectionId] ?? []
+        : []
 
-      return (left.dueDate ?? left.startDate ?? '').localeCompare(right.dueDate ?? right.startDate ?? '')
-    })
-  }, [activeSmartLists, activeTasks, activeView, deferredSearch, metadataDoc, taskCollections])
+    return sortTasks(tasks, currentOrdering, manualTaskIds)
+  }, [activeSmartList, activeTasks, activeView, currentOrdering, deferredSearch, metadataDoc, taskCollections])
+  const openVisibleTasks = useMemo(
+    () => visibleTasks.filter((task) => task.status !== 'completed'),
+    [visibleTasks],
+  )
+  const completedVisibleTasks = useMemo(
+    () => visibleTasks.filter((task) => task.status === 'completed'),
+    [visibleTasks],
+  )
+  const renderedOpenTasks = useMemo(() => {
+    if (!dragSession || !canManualReorderTasks) {
+      return openVisibleTasks
+    }
+
+    return openVisibleTasks.filter((task) => task.id !== dragSession.taskId)
+  }, [canManualReorderTasks, dragSession, openVisibleTasks])
+  const renderedCompletedTasks = completedVisibleTasks
+  const draggedTask = dragSession ? visibleTasks.find((task) => task.id === dragSession.taskId) : undefined
 
   const folderNameById = new Map((metadataDoc?.folderNodes ?? []).map((entry) => [entry.id, entry.name]))
   const tagNameById = new Map((metadataDoc?.tagNodes ?? []).map((entry) => [entry.id, entry.name]))
@@ -507,24 +603,124 @@ function App() {
     setWorkspaceMode('tasks')
   }
 
-  function recordSyncIssue(source: string, failure: string, accountId = activeAccountId) {
-    const nextEntry: SyncLogEntry = {
-      id: newId(),
-      accountId,
-      source,
-      message: failure,
-      createdAt: new Date().toISOString(),
+  function handleTaskDragStart(event: React.PointerEvent<HTMLSpanElement>, task: TaskItem) {
+    if (!canManualReorderTasks || task.status === 'completed' || activeView.kind !== 'collection') {
+      return
     }
 
-    replaceSnapshotWith((current) => ({
-      ...current,
-      syncLogs: [nextEntry, ...current.syncLogs].slice(0, 50),
-    }))
+    const row = taskRowsRef.current.get(task.id)
+    if (!row) {
+      return
+    }
+
+    const rect = row.getBoundingClientRect()
+    event.preventDefault()
+
+    setDragSession({
+      taskId: task.id,
+      pointerX: event.clientX,
+      pointerY: event.clientY,
+      offsetX: event.clientX - rect.left,
+      offsetY: event.clientY - rect.top,
+      width: rect.width,
+      height: rect.height,
+    })
   }
+
+  const recordSyncIssue = useCallback(
+    (source: string, failure: string, accountId = activeAccountId) => {
+      const nextEntry: SyncLogEntry = {
+        id: newId(),
+        accountId,
+        source,
+        message: failure,
+        createdAt: new Date().toISOString(),
+      }
+
+      replaceSnapshotWith((current) => ({
+        ...current,
+        syncLogs: [nextEntry, ...current.syncLogs].slice(0, 50),
+      }))
+    },
+    [activeAccountId],
+  )
 
   function toggleFolderCollapsed(folderId: string) {
     setCollapsedFolders((current) =>
       current.includes(folderId) ? current.filter((id) => id !== folderId) : [...current, folderId],
+    )
+  }
+
+  const isManualOrderingEnabled = useCallback(
+    (collectionId: string): boolean =>
+      normalizeOrdering(metadataDoc?.taskListOrderings[collectionId], defaultTaskListOrdering()).mode === 'manual',
+    [metadataDoc?.taskListOrderings],
+  )
+
+  function withTaskPosition(
+    doc: MetadataDocument,
+    task: Pick<TaskItem, 'id' | 'collectionId' | 'status'>,
+    previousTask?: Pick<TaskItem, 'id' | 'collectionId' | 'status'>,
+  ): MetadataDocument {
+    const previousCollectionId = previousTask?.collectionId
+    const nextManualTaskOrder = Object.fromEntries(
+      Object.entries(doc.manualTaskOrder).map(([collectionId, taskIds]) => [
+        collectionId,
+        (taskIds ?? []).filter((taskId) => taskId !== task.id),
+      ]),
+    )
+
+    if (previousCollectionId && !nextManualTaskOrder[previousCollectionId]) {
+      nextManualTaskOrder[previousCollectionId] = []
+    }
+
+    if (
+      task.status !== 'completed' &&
+      normalizeOrdering(doc.taskListOrderings[task.collectionId], defaultTaskListOrdering()).mode === 'manual'
+    ) {
+      const currentIds = nextManualTaskOrder[task.collectionId] ?? []
+      const shouldPreservePosition =
+        previousTask &&
+        previousTask.collectionId === task.collectionId &&
+        previousTask.status !== 'completed' &&
+        (doc.manualTaskOrder[task.collectionId] ?? []).includes(task.id)
+
+      nextManualTaskOrder[task.collectionId] = shouldPreservePosition ? currentIds : [...currentIds, task.id]
+    }
+
+    return {
+      ...doc,
+      manualTaskOrder: nextManualTaskOrder,
+    }
+  }
+
+  async function handleUpdateTaskListOrdering(
+    collectionId: string,
+    patch: Partial<TaskOrdering>,
+  ) {
+    if (!metadataDoc) {
+      return
+    }
+
+    const currentOrdering = normalizeOrdering(metadataDoc.taskListOrderings[collectionId], defaultTaskListOrdering())
+    const nextOrdering = normalizeOrdering(
+      {
+        ...currentOrdering,
+        ...patch,
+      },
+      defaultTaskListOrdering(),
+    )
+
+    await saveMetadata(
+      {
+        ...metadataDoc,
+        taskListOrderings: {
+          ...metadataDoc.taskListOrderings,
+          [collectionId]: nextOrdering,
+        },
+        updatedAt: new Date().toISOString(),
+      },
+      'Task list ordering updated.',
     )
   }
 
@@ -623,6 +819,7 @@ function App() {
       return
     }
 
+    const previousTask = snapshot.tasks.find((task) => task.id === taskDraft.id)
     const targetCollection =
       taskCollections.find((collection) => collection.id === taskDraft.collectionId) ?? taskCollections[0]
     const now = new Date().toISOString()
@@ -661,8 +858,25 @@ function App() {
           { ...nextTask, url: remote.url, etag: remote.etag, syncState: 'synced' },
         ],
       }))
+      const nextMetadataDoc = withTaskPosition(
+        metadataDoc,
+        { ...nextTask, status: nextTask.status, collectionId: targetCollection.id },
+        previousTask,
+      )
+      const metadataChanged =
+        JSON.stringify(nextMetadataDoc.manualTaskOrder) !== JSON.stringify(metadataDoc.manualTaskOrder)
+      if (metadataChanged) {
+        await saveMetadata(
+          {
+            ...nextMetadataDoc,
+            updatedAt: new Date().toISOString(),
+          },
+          'Task saved to CalDAV.',
+        )
+      } else {
+        setMessage('Task saved to CalDAV.')
+      }
       closeEditor()
-      setMessage('Task saved to CalDAV.')
     } catch (error) {
       replaceSnapshotWith((current) => ({
         ...current,
@@ -709,6 +923,16 @@ function App() {
           { ...updatedTask, url: remote.url, etag: remote.etag, syncState: 'synced' },
         ],
       })
+      const nextMetadataDoc = withTaskPosition(metadataDoc, updatedTask, task)
+      if (JSON.stringify(nextMetadataDoc.manualTaskOrder) !== JSON.stringify(metadataDoc.manualTaskOrder)) {
+        await saveMetadata(
+          {
+            ...nextMetadataDoc,
+            updatedAt: new Date().toISOString(),
+          },
+          'Task updated.',
+        )
+      }
     } catch (error) {
       replaceSnapshot({
         ...snapshot,
@@ -738,6 +962,24 @@ function App() {
 
     try {
       await deleteTaskRemote(activeAccount, existing)
+      if (metadataDoc) {
+        const nextMetadataDoc = {
+          ...metadataDoc,
+          manualTaskOrder: Object.fromEntries(
+            Object.entries(metadataDoc.manualTaskOrder).map(([collectionId, taskIds]) => [
+              collectionId,
+              (taskIds ?? []).filter((taskId) => taskId !== existing.id),
+            ]),
+          ),
+          updatedAt: new Date().toISOString(),
+        }
+        if (JSON.stringify(nextMetadataDoc.manualTaskOrder) !== JSON.stringify(metadataDoc.manualTaskOrder)) {
+          await saveMetadata(nextMetadataDoc, 'Task deleted from CalDAV.')
+        } else {
+          setMessage('Task deleted from CalDAV.')
+        }
+        return
+      }
       setMessage('Task deleted from CalDAV.')
     } catch (error) {
       replaceSnapshot({
@@ -750,36 +992,138 @@ function App() {
     }
   }
 
-  async function saveMetadata(doc: MetadataDocument, successMessage: string) {
-    if (!activeAccount || !metadataCollection) {
+  const saveMetadata = useCallback(
+    async (doc: MetadataDocument, successMessage: string) => {
+      if (!activeAccount || !metadataCollection) {
+        return
+      }
+
+      replaceSnapshotWith((current) => ({
+        ...current,
+        metadataDocs: [...current.metadataDocs.filter((entry) => entry.accountId !== doc.accountId), doc],
+      }))
+
+      try {
+        const remote = await saveMetadataRemote(activeAccount, metadataCollection, doc, taskCollections)
+        replaceSnapshotWith((current) => ({
+          ...current,
+          metadataDocs: [
+            ...current.metadataDocs.filter((entry) => entry.accountId !== doc.accountId),
+            {
+              ...doc,
+              url: remote.url,
+              etag: remote.etag,
+            },
+          ],
+        }))
+        setMessage(successMessage)
+      } catch (error) {
+        const failure = error instanceof Error ? error.message : 'Metadata save failed.'
+        recordSyncIssue('Metadata sync', failure, activeAccount.id)
+        setMessage(failure)
+      }
+    },
+    [activeAccount, metadataCollection, recordSyncIssue, taskCollections],
+  )
+
+  useEffect(() => {
+    if (!dragSession || !canManualReorderTasks) {
       return
     }
 
-    replaceSnapshotWith((current) => ({
-      ...current,
-      metadataDocs: [...current.metadataDocs.filter((entry) => entry.accountId !== doc.accountId), doc],
-    }))
+    function updateDropIndex(pointerY: number) {
+      const openTaskIds = renderedOpenTasks.map((task) => task.id)
+      if (openTaskIds.length === 0) {
+        setDropIndex(0)
+        return
+      }
 
-    try {
-      const remote = await saveMetadataRemote(activeAccount, metadataCollection, doc, taskCollections)
-      replaceSnapshotWith((current) => ({
-        ...current,
-        metadataDocs: [
-          ...current.metadataDocs.filter((entry) => entry.accountId !== doc.accountId),
-          {
-            ...doc,
-            url: remote.url,
-            etag: remote.etag,
-          },
-        ],
-      }))
-      setMessage(successMessage)
-    } catch (error) {
-      const failure = error instanceof Error ? error.message : 'Metadata save failed.'
-      recordSyncIssue('Metadata sync', failure, activeAccount.id)
-      setMessage(failure)
+      for (let index = 0; index < openTaskIds.length; index += 1) {
+        const element = taskRowsRef.current.get(openTaskIds[index])
+        if (!element) {
+          continue
+        }
+
+        const rect = element.getBoundingClientRect()
+        if (pointerY < rect.top + rect.height / 2) {
+          setDropIndex(index)
+          return
+        }
+      }
+
+      setDropIndex(openTaskIds.length)
     }
-  }
+
+    function handlePointerMove(event: PointerEvent) {
+      setDragSession((current) =>
+        current
+          ? {
+              ...current,
+              pointerX: event.clientX,
+              pointerY: event.clientY,
+            }
+          : current,
+      )
+      updateDropIndex(event.clientY)
+    }
+
+    function finishDrag(commit: boolean) {
+      const currentDropIndex = dropIndex ?? renderedOpenTasks.length
+      const currentDragSession = dragSession
+      setDragSession(undefined)
+      setDropIndex(undefined)
+
+      if (
+        commit &&
+        currentDragSession &&
+        metadataDoc &&
+        activeView.kind === 'collection' &&
+        isManualOrderingEnabled(activeView.collectionId)
+      ) {
+        const collectionId = activeView.collectionId
+        const openTaskIds = visibleTasks.filter((task) => task.status !== 'completed').map((task) => task.id)
+        const baseOrder = [
+          ...(metadataDoc.manualTaskOrder[collectionId] ?? []).filter((id) => openTaskIds.includes(id)),
+          ...openTaskIds.filter((id) => !(metadataDoc.manualTaskOrder[collectionId] ?? []).includes(id)),
+        ]
+        const nextOrder = moveTaskIdToIndex(baseOrder, currentDragSession.taskId, currentDropIndex)
+        void saveMetadata(
+          {
+            ...metadataDoc,
+            manualTaskOrder: {
+              ...metadataDoc.manualTaskOrder,
+              [collectionId]: nextOrder,
+            },
+            updatedAt: new Date().toISOString(),
+          },
+          'Task order updated.',
+        )
+      }
+    }
+
+    function handlePointerUp() {
+      finishDrag(true)
+    }
+
+    function handleKeyDown(event: KeyboardEvent) {
+      if (event.key === 'Escape') {
+        finishDrag(false)
+      }
+    }
+
+    window.addEventListener('pointermove', handlePointerMove)
+    window.addEventListener('pointerup', handlePointerUp)
+    window.addEventListener('keydown', handleKeyDown)
+    document.body.classList.add('drag-active')
+    updateDropIndex(dragSession.pointerY)
+
+    return () => {
+      window.removeEventListener('pointermove', handlePointerMove)
+      window.removeEventListener('pointerup', handlePointerUp)
+      window.removeEventListener('keydown', handleKeyDown)
+      document.body.classList.remove('drag-active')
+    }
+  }, [activeView, canManualReorderTasks, dragSession, dropIndex, isManualOrderingEnabled, metadataDoc, renderedOpenTasks, saveMetadata, visibleTasks])
 
   async function handleAddFolder() {
     if (!metadataDoc || !activeAccountId || !folderDraft.name.trim()) {
@@ -918,6 +1262,12 @@ function App() {
               Object.entries(metadataDoc.collectionFolders).filter(([key]) => key !== collectionId),
             ),
             collectionOrder: metadataDoc.collectionOrder.filter((id) => id !== collectionId),
+            taskListOrderings: Object.fromEntries(
+              Object.entries(metadataDoc.taskListOrderings).filter(([key]) => key !== collectionId),
+            ),
+            manualTaskOrder: Object.fromEntries(
+              Object.entries(metadataDoc.manualTaskOrder).filter(([key]) => key !== collectionId),
+            ),
             updatedAt: new Date().toISOString(),
           }
         : undefined
@@ -1042,6 +1392,7 @@ function App() {
       accountId: activeAccount.id,
       name: smartDraftName.trim(),
       filter: smartDraftFilter,
+      ordering: normalizeOrdering(smartDraftOrdering, defaultSmartListOrdering()),
       syncState: 'syncing',
       updatedAt: new Date().toISOString(),
     }
@@ -1064,6 +1415,7 @@ function App() {
       setSmartDraftId(undefined)
       setSmartDraftName('')
       setSmartDraftFilter(defaultFilter())
+      setSmartDraftOrdering(defaultSmartListOrdering())
       setIsSmartEditorOpen(false)
     } catch (error) {
       const failure = error instanceof Error ? error.message : 'Smart list save failed.'
@@ -1188,7 +1540,20 @@ function App() {
           { ...nextTask, url: remote.url, etag: remote.etag, syncState: 'synced' },
         ],
       }))
-      setMessage('Task added.')
+      const nextMetadataDoc = withTaskPosition(metadataDoc, nextTask)
+      const metadataChanged =
+        JSON.stringify(nextMetadataDoc.manualTaskOrder) !== JSON.stringify(metadataDoc.manualTaskOrder)
+      if (metadataChanged) {
+        await saveMetadata(
+          {
+            ...nextMetadataDoc,
+            updatedAt: new Date().toISOString(),
+          },
+          'Task added.',
+        )
+      } else {
+        setMessage('Task added.')
+      }
     } catch (error) {
       replaceSnapshotWith((current) => ({
         ...current,
@@ -1207,6 +1572,7 @@ function App() {
     setSmartDraftId(smartList.id)
     setSmartDraftName(smartList.name)
     setSmartDraftFilter(smartList.filter)
+    setSmartDraftOrdering(normalizeOrdering(smartList.ordering, defaultSmartListOrdering()))
     setIsSmartEditorOpen(true)
   }
 
@@ -1255,6 +1621,8 @@ function App() {
   }
 
   function renderSettingsCollectionRow(collection: (typeof orderedTaskCollections)[number], depth: number) {
+    const ordering = normalizeOrdering(metadataDoc?.taskListOrderings[collection.id], defaultTaskListOrdering())
+
     return (
       <div key={collection.id} className={`assign-row structure-row depth-${Math.min(depth, 3)}`}>
         <span>{collection.displayName}</span>
@@ -1272,6 +1640,49 @@ function App() {
               </option>
             ))}
           </select>
+          <select
+            value={ordering.mode}
+            onChange={(event) =>
+              void handleUpdateTaskListOrdering(collection.id, {
+                mode: event.target.value as TaskOrdering['mode'],
+              })
+            }
+          >
+            <option value="manual">Manual</option>
+            <option value="property">Property</option>
+          </select>
+          {ordering.mode === 'property' && (
+            <>
+              <select
+                value={ordering.field}
+                onChange={(event) =>
+                  void handleUpdateTaskListOrdering(collection.id, {
+                    field: event.target.value as TaskOrderField,
+                  })
+                }
+              >
+                {orderingFields.map((field) => (
+                  <option key={field.value} value={field.value}>
+                    {field.label}
+                  </option>
+                ))}
+              </select>
+              <select
+                value={ordering.direction}
+                onChange={(event) =>
+                  void handleUpdateTaskListOrdering(collection.id, {
+                    direction: event.target.value as SortDirection,
+                  })
+                }
+              >
+                {sortDirections.map((direction) => (
+                  <option key={direction.value} value={direction.value}>
+                    {direction.label}
+                  </option>
+                ))}
+              </select>
+            </>
+          )}
           <button className="ghost-button" onClick={() => void handleReorderTaskList(collection.id, 'up')}>
             Up
           </button>
@@ -1358,6 +1769,7 @@ function App() {
                   setSmartDraftId(undefined)
                   setSmartDraftName('')
                   setSmartDraftFilter(defaultFilter())
+                  setSmartDraftOrdering(defaultSmartListOrdering())
                   setIsSmartEditorOpen(true)
                 }}
               >
@@ -1457,7 +1869,17 @@ function App() {
               <button className="ghost-button" onClick={() => openSettings('accounts')}>
                 Settings
               </button>
-              <button className="ghost-button" onClick={() => setIsSmartEditorOpen(true)} disabled={!activeAccount}>
+              <button
+                className="ghost-button"
+                onClick={() => {
+                  setSmartDraftId(undefined)
+                  setSmartDraftName('')
+                  setSmartDraftFilter(defaultFilter())
+                  setSmartDraftOrdering(defaultSmartListOrdering())
+                  setIsSmartEditorOpen(true)
+                }}
+                disabled={!activeAccount}
+              >
                 Smart list
               </button>
               <button className="primary-button" onClick={() => void handleSyncAccount()} disabled={!activeAccount || busy}>
@@ -1813,33 +2235,130 @@ function App() {
                 </div>
               )}
 
-              {visibleTasks.map((task) => (
+              {renderedOpenTasks.map((task, index) => {
+                const isAboveGap = dragSession && dropIndex === index + 1
+                const isBelowGap = dragSession && dropIndex === index
+
+                return (
+                  <div key={task.id}>
+                    {dragSession && dropIndex === index && <div className="task-drop-slot" />}
+                    <div
+                      className={`task-row-shell ${isAboveGap ? 'gap-neighbor-above' : ''} ${
+                        isBelowGap ? 'gap-neighbor-below' : ''
+                      }`}
+                      ref={(element) => {
+                        if (element) {
+                          taskRowsRef.current.set(task.id, element)
+                        } else {
+                          taskRowsRef.current.delete(task.id)
+                        }
+                      }}
+                    >
+                      <div
+                        className={`task-row ${task.id === selectedTaskId ? 'selected' : ''} ${
+                          task.status === 'completed' ? 'done' : ''
+                        } ${canManualReorderTasks && task.status !== 'completed' ? 'reorderable' : ''}`}
+                        onPointerDown={(event) => {
+                          const target = event.target as HTMLElement
+                          if (
+                            canManualReorderTasks &&
+                            task.status !== 'completed' &&
+                            !target.closest('.task-check')
+                          ) {
+                            handleTaskDragStart(event, task)
+                          }
+                        }}
+                      >
+                        {canManualReorderTasks && task.status !== 'completed' && (
+                          <span className="task-drag-handle">::</span>
+                        )}
+                        <button
+                          className={`task-check ${task.status === 'completed' ? 'checked' : ''}`}
+                          onClick={() => void handleToggleTaskStatus(task)}
+                        >
+                          {task.status === 'completed' ? 'x' : ''}
+                        </button>
+                        <button className="task-main" onClick={() => openTask(task.id)}>
+                          <span className="task-title">{task.title || 'Untitled task'}</span>
+                          <span className="task-subline">{task.notes || 'No description'}</span>
+                        </button>
+                        <div className="task-side">
+                          <span className={`priority-badge priority-${task.priority}`}>P{task.priority || 0}</span>
+                          <span className="task-date">{displayDate(task.dueDate ?? task.startDate)}</span>
+                          <span className="task-list-name">
+                            {taskCollections.find((collection) => collection.id === task.collectionId)?.displayName}
+                          </span>
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+                )
+              })}
+
+              {dragSession && dropIndex === renderedOpenTasks.length && <div className="task-drop-slot" />}
+
+              {renderedCompletedTasks.map((task) => (
                 <div
                   key={task.id}
-                  className={`task-row ${task.id === selectedTaskId ? 'selected' : ''} ${task.status === 'completed' ? 'done' : ''}`}
+                  className="task-row-shell"
+                  ref={(element) => {
+                    if (element) {
+                      taskRowsRef.current.set(task.id, element)
+                    } else {
+                      taskRowsRef.current.delete(task.id)
+                    }
+                  }}
                 >
-                  <button
-                    className={`task-check ${task.status === 'completed' ? 'checked' : ''}`}
-                    onClick={() => void handleToggleTaskStatus(task)}
-                  >
-                    {task.status === 'completed' ? 'x' : ''}
-                  </button>
-                  <button className="task-main" onClick={() => openTask(task.id)}>
-                    <span className="task-title">{task.title || 'Untitled task'}</span>
-                    <span className="task-subline">
-                      {task.notes || 'No description'}
-                    </span>
-                  </button>
-                  <div className="task-side">
-                    <span className={`priority-badge priority-${task.priority}`}>P{task.priority || 0}</span>
-                    <span className="task-date">{displayDate(task.dueDate ?? task.startDate)}</span>
-                    <span className="task-list-name">
-                      {taskCollections.find((collection) => collection.id === task.collectionId)?.displayName}
-                    </span>
+                  <div className={`task-row ${task.id === selectedTaskId ? 'selected' : ''} done`}>
+                    <button
+                      className={`task-check ${task.status === 'completed' ? 'checked' : ''}`}
+                      onClick={() => void handleToggleTaskStatus(task)}
+                    >
+                      {task.status === 'completed' ? 'x' : ''}
+                    </button>
+                    <button className="task-main" onClick={() => openTask(task.id)}>
+                      <span className="task-title">{task.title || 'Untitled task'}</span>
+                      <span className="task-subline">{task.notes || 'No description'}</span>
+                    </button>
+                    <div className="task-side">
+                      <span className={`priority-badge priority-${task.priority}`}>P{task.priority || 0}</span>
+                      <span className="task-date">{displayDate(task.dueDate ?? task.startDate)}</span>
+                      <span className="task-list-name">
+                        {taskCollections.find((collection) => collection.id === task.collectionId)?.displayName}
+                      </span>
+                    </div>
                   </div>
                 </div>
               ))}
             </div>
+            {dragSession && draggedTask && (
+              <div
+                className="task-drag-preview"
+                style={{
+                  width: `${dragSession.width}px`,
+                  top: `${dragSession.pointerY - dragSession.offsetY}px`,
+                  left: `${dragSession.pointerX - dragSession.offsetX}px`,
+                }}
+              >
+                <div className="task-row reorderable">
+                  <span className="task-drag-handle">::</span>
+                  <button className={`task-check ${draggedTask.status === 'completed' ? 'checked' : ''}`} tabIndex={-1}>
+                    {draggedTask.status === 'completed' ? 'x' : ''}
+                  </button>
+                  <div className="task-main">
+                    <span className="task-title">{draggedTask.title || 'Untitled task'}</span>
+                    <span className="task-subline">{draggedTask.notes || 'No description'}</span>
+                  </div>
+                  <div className="task-side">
+                    <span className={`priority-badge priority-${draggedTask.priority}`}>P{draggedTask.priority || 0}</span>
+                    <span className="task-date">{displayDate(draggedTask.dueDate ?? draggedTask.startDate)}</span>
+                    <span className="task-list-name">
+                      {taskCollections.find((collection) => collection.id === draggedTask.collectionId)?.displayName}
+                    </span>
+                  </div>
+                </div>
+              </div>
+            )}
           </section>
         ) : (
           <section className="workspace-surface editor-surface">
@@ -2088,6 +2607,40 @@ function App() {
                   />
                 </div>
               )}
+              <div className="settings-form split">
+                <select
+                  value={smartDraftOrdering.field}
+                  onChange={(event) =>
+                    setSmartDraftOrdering((current) => ({
+                      ...current,
+                      mode: 'property',
+                      field: event.target.value as TaskOrderField,
+                    }))
+                  }
+                >
+                  {orderingFields.map((field) => (
+                    <option key={field.value} value={field.value}>
+                      {field.label}
+                    </option>
+                  ))}
+                </select>
+                <select
+                  value={smartDraftOrdering.direction}
+                  onChange={(event) =>
+                    setSmartDraftOrdering((current) => ({
+                      ...current,
+                      mode: 'property',
+                      direction: event.target.value as SortDirection,
+                    }))
+                  }
+                >
+                  {sortDirections.map((direction) => (
+                    <option key={direction.value} value={direction.value}>
+                      {direction.label}
+                    </option>
+                  ))}
+                </select>
+              </div>
               <div className="editor-header-actions">
                 {smartDraftId && (
                   <button

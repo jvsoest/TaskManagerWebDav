@@ -3,6 +3,15 @@ export type CollectionKind = 'task' | 'metadata' | 'smart'
 export type TaskStatus = 'needs-action' | 'in-process' | 'completed' | 'cancelled'
 
 export type SyncState = 'idle' | 'syncing' | 'synced' | 'error'
+export type TaskOrderMode = 'manual' | 'property'
+export type TaskOrderField = 'dueDate' | 'startDate' | 'priority' | 'title' | 'createdAt' | 'updatedAt' | 'status'
+export type SortDirection = 'asc' | 'desc'
+
+export interface TaskOrdering {
+  mode: TaskOrderMode
+  field: TaskOrderField
+  direction: SortDirection
+}
 
 export interface Account {
   id: string
@@ -48,6 +57,8 @@ export interface MetadataDocument {
   tagNodes: TagNode[]
   collectionFolders: Record<string, string | undefined>
   collectionOrder: string[]
+  taskListOrderings: Record<string, TaskOrdering | undefined>
+  manualTaskOrder: Record<string, string[] | undefined>
   updatedAt: string
   url?: string
   etag?: string
@@ -90,6 +101,7 @@ export interface SmartList {
   accountId: string
   name: string
   filter: TaskFilter
+  ordering: TaskOrdering
   url?: string
   etag?: string
   syncState: SyncState

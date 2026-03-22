@@ -29,6 +29,10 @@ body {
   font-family: 'Inter', sans-serif;
 }
 
+body.drag-active {
+  user-select: none;
+}
+
 button,
 input,
 select,
@@ -383,27 +387,85 @@ button {
 }
 
 .task-rows {
-  background: var(--surface);
+  background: #f2f3f5;
   border: 1px solid var(--line);
   border-radius: 12px;
-  overflow: hidden;
+  padding: 6px;
+}
+
+.task-row-shell {
+  position: relative;
+  padding: 0;
+  transition:
+    padding 140ms ease,
+    margin 140ms ease;
+}
+
+.task-row-shell + .task-row-shell {
+  margin-top: 6px;
 }
 
 .task-row {
   display: grid;
-  grid-template-columns: auto minmax(0, 1fr) auto;
+  grid-template-columns: auto auto minmax(0, 1fr) auto;
   gap: 12px;
   align-items: center;
   padding: 12px 16px;
-  border-top: 1px solid var(--line);
-}
-
-.task-row:first-child {
-  border-top: 0;
+  background: var(--surface);
+  border-radius: 10px;
+  transition:
+    margin 140ms ease,
+    transform 140ms ease,
+    background-color 140ms ease,
+    box-shadow 140ms ease,
+    border-radius 140ms ease;
 }
 
 .task-row.selected {
   background: #fff9f8;
+}
+
+.task-row.reorderable {
+  cursor: default;
+}
+
+.task-row-shell.gap-neighbor-above .task-row {
+  border-bottom-left-radius: 14px;
+  border-bottom-right-radius: 14px;
+}
+
+.task-row-shell.gap-neighbor-below .task-row {
+  border-top-left-radius: 14px;
+  border-top-right-radius: 14px;
+}
+
+.task-drag-handle {
+  color: var(--muted);
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  user-select: none;
+  touch-action: none;
+  cursor: grab;
+}
+
+.task-drop-slot {
+  height: 22px;
+  margin: 6px 0;
+  border-radius: 12px;
+  background: #f2f3f5;
+  box-shadow: inset 0 0 0 1px rgba(219, 76, 63, 0.18);
+}
+
+.task-drag-preview {
+  position: fixed;
+  z-index: 30;
+  pointer-events: none;
+}
+
+.task-drag-preview .task-row {
+  box-shadow: 0 18px 36px rgba(15, 23, 42, 0.18);
+  transform: rotate(-1deg);
+  background: #fffdfc;
 }
 
 .task-row.done .task-title,
@@ -772,6 +834,7 @@ button {
   display: flex;
   align-items: center;
   gap: 8px;
+  flex-wrap: wrap;
 }
 
 .row-control-group {
@@ -870,11 +933,11 @@ button {
 
   .task-row {
     display: grid;
-    grid-template-columns: auto minmax(0, 1fr);
+    grid-template-columns: auto auto minmax(0, 1fr);
   }
 
   .task-side {
-    grid-column: 2;
+    grid-column: 3;
     justify-content: flex-start;
   }
 
