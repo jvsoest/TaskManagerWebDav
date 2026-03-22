@@ -20,6 +20,26 @@ npm install
 npm run dev
 ```
 
+## GitHub Pages
+
+GitHub Pages deployment is configured in [`.github/workflows/deploy-pages.yml`](/home/jsoest/Repositories/TaskManagerWebDav/.github/workflows/deploy-pages.yml).
+
+- Push to `main` to build and deploy the app to GitHub Pages
+- Enable Pages in the repository settings and select `GitHub Actions` as the source
+- The Vite base path is set automatically for Pages builds in [`vite.config.ts`](/home/jsoest/Repositories/TaskManagerWebDav/vite.config.ts)
+
+### Custom Subdomain
+
+The workflow also supports a custom domain on a subdomain such as `tasks.example.com`.
+
+1. In GitHub, open `Settings -> Secrets and variables -> Actions -> Variables`
+2. Add a repository variable named `CUSTOM_DOMAIN`
+3. Set its value to your subdomain, for example `tasks.example.com`
+4. In your DNS provider, create a `CNAME` record for that subdomain pointing to your GitHub Pages host, usually `<your-github-username>.github.io`
+5. Push to `main` again
+
+When `CUSTOM_DOMAIN` is set, the workflow writes a `dist/CNAME` file automatically before deployment.
+
 ## Local CalDAV Test Server
 
 This repository includes a Docker Compose CalDAV server based on Radicale for local testing.
