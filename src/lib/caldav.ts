@@ -605,14 +605,34 @@ async function fetchCollectionObjects(collection: TaskCollection, authorization:
   return parseCalendarObjects(await response.text(), collection.url)
 }
 
-function metadataTask(doc: MetadataDocument, collectionId: string): TaskItem {
+function serializeMetadataDocument(doc: MetadataDocument, taskCollections: TaskCollection[]): string {
+  const collectionUrlById = new Map(taskCollections.map((collection) => [collection.id, ensureTrailingSlash(collection.url)]))
+  const serializedDoc: MetadataDocument = {
+    ...doc,
+    collectionFolders: Object.fromEntries(
+      Object.entries(doc.collectionFolders).map(([collectionId, folderId]) => [
+        collectionUrlById.get(collectionId) ?? collectionId,
+        folderId,
+      ]),
+    ),
+    collectionOrder: doc.collectionOrder.map((collectionId) => collectionUrlById.get(collectionId) ?? collectionId),
+  }
+
+  return JSON.stringify(serializedDoc, null, 2)
+}
+
+function metadataTask(
+  doc: MetadataDocument,
+  collectionId: string,
+  taskCollections: TaskCollection[],
+): TaskItem {
   return {
     id: 'taskmanager-metadata',
     uid: 'taskmanager-metadata',
     accountId: doc.accountId,
     collectionId,
     title: 'TaskManager Metadata',
-    notes: JSON.stringify(doc, null, 2),
+    notes: serializeMetadataDocument(doc, taskCollections),
     status: 'needs-action',
     priority: 0,
     createdAt: doc.updatedAt,
@@ -621,6 +641,54 @@ function metadataTask(doc: MetadataDocument, collectionId: string): TaskItem {
     syncState: 'synced',
     url: doc.url,
     etag: doc.etag,
+  }
+}
+
+function extractCollectionRef(value: string): string {
+  if (value.includes('://')) {
+    return ensureTrailingSlash(value)
+  }
+
+  const separatorIndex = value.indexOf(':')
+  if (separatorIndex >= 0) {
+    return ensureTrailingSlash(value.slice(separatorIndex + 1))
+  }
+
+  return value
+}
+
+function normalizeMetadataDocument(
+  rawDoc: MetadataDocument,
+  accountId: string,
+  taskCollections: TaskCollection[],
+  url?: string,
+  etag?: string,
+): MetadataDocument {
+  const collectionIdByRef = new Map<string, string>()
+  taskCollections.forEach((collection) => {
+    collectionIdByRef.set(collection.id, collection.id)
+    collectionIdByRef.set(ensureTrailingSlash(collection.url), collection.id)
+  })
+
+  const normalizedCollectionFolders = Object.fromEntries(
+    Object.entries(rawDoc.collectionFolders ?? {}).flatMap(([storedCollectionRef, folderId]) => {
+      const collectionId = collectionIdByRef.get(extractCollectionRef(storedCollectionRef))
+      return collectionId ? [[collectionId, folderId]] : []
+    }),
+  )
+
+  const normalizedCollectionOrder = (rawDoc.collectionOrder ?? []).flatMap((storedCollectionRef) => {
+    const collectionId = collectionIdByRef.get(extractCollectionRef(storedCollectionRef))
+    return collectionId ? [collectionId] : []
+  })
+
+  return {
+    ...rawDoc,
+    accountId,
+    collectionFolders: normalizedCollectionFolders,
+    collectionOrder: normalizedCollectionOrder,
+    url,
+    etag,
   }
 }
 
@@ -686,6 +754,7 @@ export async function syncAccount(account: Account, collections: TaskCollection[
   const authorization = authHeader(account.username, account.password)
   const metadataCollection = collections.find((collection) => collection.kind === 'metadata')
   const smartCollection = collections.find((collection) => collection.kind === 'smart')
+  const taskCollections = collections.filter((collection) => collection.kind === 'task')
   if (!metadataCollection || !smartCollection) {
     throw new Error('Required hidden TaskManager collections are missing.')
   }
@@ -697,20 +766,22 @@ export async function syncAccount(account: Account, collections: TaskCollection[
   let metadataDoc = defaultMetadata
   if (metadataEntry?.payload) {
     try {
-      const metadataTask = parseTaskFromIcs(metadataEntry.payload, account.id, metadataCollection.id)
-      metadataDoc = {
-        ...defaultMetadata,
-        ...JSON.parse(metadataTask?.notes ?? '{}'),
-        accountId: account.id,
-        url: metadataEntry.href,
-        etag: metadataEntry.etag,
-      }
+      const parsedMetadataTask = parseTaskFromIcs(metadataEntry.payload, account.id, metadataCollection.id)
+      metadataDoc = normalizeMetadataDocument(
+        {
+          ...defaultMetadata,
+          ...JSON.parse(parsedMetadataTask?.notes ?? '{}'),
+        },
+        account.id,
+        taskCollections,
+        metadataEntry.href,
+        metadataEntry.etag,
+      )
     } catch {
       metadataDoc = defaultMetadata
     }
   }
 
-  const taskCollections = collections.filter((collection) => collection.kind === 'task')
   const taskLists = await Promise.all(
     taskCollections.map(async (collection) => {
       const objects = await fetchCollectionObjects(collection, authorization)
@@ -828,10 +899,11 @@ export async function saveMetadataRemote(
   account: Account,
   collection: TaskCollection,
   metadataDoc: MetadataDocument,
+  taskCollections: TaskCollection[],
 ): Promise<{ url: string; etag?: string }> {
   const url = metadataDoc.url ?? resolveUrl(collection.url, METADATA_RESOURCE_NAME)
   const metadataTaskItem = (etag = metadataDoc.etag): TaskItem => ({
-    ...metadataTask(metadataDoc, collection.id),
+    ...metadataTask(metadataDoc, collection.id, taskCollections),
     url,
     etag,
   })

@@ -96,3 +96,18 @@ export async function saveSnapshot(snapshot: AppSnapshot): Promise<void> {
 
   await wrapTransaction(transaction)
 }
+
+export async function clearLocalCache(): Promise<void> {
+  if (openPromise) {
+    const db = await openPromise
+    db.close()
+    openPromise = undefined
+  }
+
+  await new Promise<void>((resolve, reject) => {
+    const request = indexedDB.deleteDatabase(DB_NAME)
+    request.onsuccess = () => resolve()
+    request.onerror = () => reject(request.error)
+    request.onblocked = () => reject(new Error('IndexedDB delete was blocked by another open tab.'))
+  })
+}

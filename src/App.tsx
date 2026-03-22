@@ -1,7 +1,7 @@
 import { startTransition, useDeferredValue, useEffect, useMemo, useRef, useState } from 'react'
 import './App.css'
 import { createDefaultMetadata, defaultFilter, getSmartListCount, taskMatchesFilter } from './lib/filters'
-import { loadSnapshot, saveSnapshot } from './lib/idb'
+import { clearLocalCache, loadSnapshot, saveSnapshot } from './lib/idb'
 import { notifyDueTasks, requestNotifications } from './lib/notifications'
 import {
   createTaskCollection,
@@ -726,7 +726,7 @@ function App() {
     }))
 
     try {
-      const remote = await saveMetadataRemote(activeAccount, metadataCollection, doc)
+      const remote = await saveMetadataRemote(activeAccount, metadataCollection, doc, taskCollections)
       replaceSnapshotWith((current) => ({
         ...current,
         metadataDocs: [
@@ -886,7 +886,7 @@ function App() {
         : undefined
 
       if (nextMetadataDoc) {
-        const remote = await saveMetadataRemote(activeAccount, metadataCollection!, nextMetadataDoc!)
+        const remote = await saveMetadataRemote(activeAccount, metadataCollection!, nextMetadataDoc!, taskCollections)
         nextMetadataDoc = {
           ...nextMetadataDoc,
           url: remote.url,
@@ -1059,6 +1059,44 @@ function App() {
         ? 'Notifications enabled. Reminders fire while the PWA is active.'
         : 'Notification permission was not granted.',
     )
+  }
+
+  async function handleClearLocalCache() {
+    setBusy(true)
+    setMessage('Clearing local cache...')
+
+    try {
+      await clearLocalCache()
+
+      if ('caches' in window) {
+        const cacheKeys = await window.caches.keys()
+        await Promise.all(cacheKeys.map((key) => window.caches.delete(key)))
+      }
+
+      replaceSnapshot(emptySnapshot)
+      setActiveAccountId(undefined)
+      setActiveView({ kind: 'all' })
+      setSelectedTaskId(undefined)
+      setTaskDraft(createDraft())
+      setIsCreatingTask(false)
+      setSmartDraftId(undefined)
+      setSmartDraftName('')
+      setSmartDraftFilter(defaultFilter())
+      setSearchText('')
+      setQuickAddTitle('')
+      setCollapsedFolders([])
+      setConnectionForm(emptyConnection)
+      setFolderDraft({ name: '', parentId: '' })
+      setTagDraft({ name: '', parentId: '' })
+      setListDraft({ name: '', folderId: '' })
+      setWorkspaceMode('settings')
+      setSettingsSection('accounts')
+      setMessage('Local cache cleared. Reconnect an account to sync again.')
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : 'Failed to clear local cache.')
+    } finally {
+      setBusy(false)
+    }
   }
 
   async function handleQuickAdd() {
@@ -1486,6 +1524,23 @@ function App() {
                       <button className="primary-button" onClick={() => void handleConnectAccount()} disabled={busy}>
                         Connect account
                       </button>
+                    </div>
+
+                    <div className="settings-block">
+                      <div className="section-title-row">
+                        <h4>Local cache</h4>
+                      </div>
+                      <div className="simple-row">
+                        <div>
+                          <strong>Clear all local cache</strong>
+                          <span>Removes IndexedDB and browser cache storage without touching the CalDAV server.</span>
+                        </div>
+                        <div className="row-control-group">
+                          <button className="ghost-button danger" onClick={() => void handleClearLocalCache()} disabled={busy}>
+                            Clear local cache
+                          </button>
+                        </div>
+                      </div>
                     </div>
                   </section>
                 )}
