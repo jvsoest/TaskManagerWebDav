@@ -2048,7 +2048,7 @@ function App() {
                           onChange={(event) =>
                             setConnectionForm((current) => ({ ...current, proxyUrl: event.target.value }))
                           }
-                          placeholder="Proxy base URL"
+                          placeholder="Proxy base URL (for combined container: /dav)"
                         />
                       )}
                       <input

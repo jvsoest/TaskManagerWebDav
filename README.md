@@ -130,6 +130,33 @@ The workflow also supports a custom domain on a subdomain such as `tasks.example
 
 When `CUSTOM_DOMAIN` is set, the workflow writes a `dist/CNAME` file automatically before deployment.
 
+## Combined Docker Deployment
+
+This repository also ships a combined Docker image that serves both the built UI and the CalDAV proxy from one origin.
+
+- Dockerfile: [`Dockerfile`](/home/jsoest/Repositories/TaskManagerWebDav/Dockerfile)
+- Container workflow: [`.github/workflows/publish-container.yml`](/home/jsoest/Repositories/TaskManagerWebDav/.github/workflows/publish-container.yml)
+- Published image target: `ghcr.io/<owner>/<repo>`
+
+Build locally:
+
+```bash
+docker build -t taskmanagerwebdav .
+```
+
+Run locally:
+
+```bash
+docker run --rm -p 8080:8080 -e UPSTREAM_ALLOWLIST=api.cirrux.co,localhost taskmanagerwebdav
+```
+
+The combined container serves:
+
+- UI at `http://localhost:8080/`
+- proxy at `http://localhost:8080/dav`
+
+For proxy-mode accounts in the combined container, use `/dav` as the proxy base URL.
+
 ## Local CalDAV Test Server
 
 This repository includes a Docker Compose CalDAV server based on Radicale for local testing.

@@ -137,7 +137,18 @@ function isRedirectStatus(status: number): boolean {
 
 function normalizeProxyUrl(proxyUrl: string): string {
   const trimmed = proxyUrl.trim()
-  return trimmed.endsWith('/') ? trimmed : `${trimmed}/`
+  if (!trimmed) {
+    return trimmed
+  }
+
+  try {
+    return new URL(trimmed).toString().endsWith('/') ? new URL(trimmed).toString() : `${new URL(trimmed).toString()}/`
+  } catch {
+    const baseUrl =
+      typeof window !== 'undefined' ? window.location.origin : 'http://localhost'
+    const resolved = new URL(trimmed, baseUrl).toString()
+    return resolved.endsWith('/') ? resolved : `${resolved}/`
+  }
 }
 
 function isCirruxServer(serverUrl: string): boolean {

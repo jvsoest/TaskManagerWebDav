@@ -1,6 +1,11 @@
+import fs from 'node:fs/promises'
 import http from 'node:http'
+import path from 'node:path'
+import { fileURLToPath } from 'node:url'
 
-const PORT = Number.parseInt(process.env.PORT ?? '8787', 10)
+const __dirname = path.dirname(fileURLToPath(import.meta.url))
+const DIST_DIR = path.resolve(__dirname, '../dist')
+const PORT = Number.parseInt(process.env.PORT ?? '8080', 10)
 const ALLOWED_ORIGINS = (process.env.ALLOWED_ORIGINS ?? '*')
   .split(',')
   .map((value) => value.trim())
@@ -20,16 +25,27 @@ const HOP_BY_HOP_HEADERS = new Set([
   'transfer-encoding',
 ])
 const MAX_REDIRECTS = 5
+const MIME_TYPES = new Map([
+  ['.css', 'text/css; charset=utf-8'],
+  ['.html', 'text/html; charset=utf-8'],
+  ['.ico', 'image/x-icon'],
+  ['.js', 'text/javascript; charset=utf-8'],
+  ['.json', 'application/json; charset=utf-8'],
+  ['.png', 'image/png'],
+  ['.svg', 'image/svg+xml'],
+  ['.txt', 'text/plain; charset=utf-8'],
+  ['.webmanifest', 'application/manifest+json; charset=utf-8'],
+  ['.woff', 'font/woff'],
+  ['.woff2', 'font/woff2'],
+])
 
-function writeJson(response, status, payload, origin = '') {
-  response.writeHead(status, {
-    'Access-Control-Allow-Origin': allowOrigin(origin),
-    'Access-Control-Allow-Methods': 'POST,OPTIONS',
-    'Access-Control-Allow-Headers': 'Content-Type',
-    'Access-Control-Max-Age': '86400',
-    'Content-Type': 'application/json; charset=utf-8',
-  })
-  response.end(JSON.stringify(payload))
+async function distExists() {
+  try {
+    const stat = await fs.stat(DIST_DIR)
+    return stat.isDirectory()
+  } catch {
+    return false
+  }
 }
 
 function allowOrigin(origin) {
@@ -40,6 +56,22 @@ function allowOrigin(origin) {
     return origin
   }
   return 'null'
+}
+
+function setCorsHeaders(response, origin = '') {
+  response.setHeader('Access-Control-Allow-Origin', allowOrigin(origin))
+  response.setHeader('Access-Control-Allow-Methods', 'POST,OPTIONS')
+  response.setHeader('Access-Control-Allow-Headers', 'Content-Type')
+  response.setHeader('Access-Control-Max-Age', '86400')
+  response.setHeader('Vary', 'Origin')
+}
+
+function writeJson(response, status, payload, origin = '') {
+  setCorsHeaders(response, origin)
+  response.writeHead(status, {
+    'Content-Type': 'application/json; charset=utf-8',
+  })
+  response.end(JSON.stringify(payload))
 }
 
 function isAllowedUpstream(url) {
@@ -93,17 +125,12 @@ async function forwardRequest(url, method, headers, body) {
   throw new Error(`Too many redirects while forwarding ${method} ${url}`)
 }
 
-const server = http.createServer(async (request, response) => {
+async function handleDavProxy(request, response) {
   const origin = request.headers.origin ?? ''
 
   if (request.method === 'OPTIONS') {
-    response.writeHead(204, {
-      'Access-Control-Allow-Origin': allowOrigin(origin),
-      'Access-Control-Allow-Methods': 'POST,OPTIONS',
-      'Access-Control-Allow-Headers': 'Content-Type',
-      'Access-Control-Max-Age': '86400',
-      Vary: 'Origin',
-    })
+    setCorsHeaders(response, origin)
+    response.writeHead(204)
     response.end()
     return
   }
@@ -158,8 +185,68 @@ const server = http.createServer(async (request, response) => {
       origin,
     )
   }
+}
+
+function isAssetRequest(urlPath) {
+  return path.extname(urlPath) !== ''
+}
+
+async function serveFile(response, filePath) {
+  const content = await fs.readFile(filePath)
+  response.writeHead(200, {
+    'Content-Type': MIME_TYPES.get(path.extname(filePath)) ?? 'application/octet-stream',
+  })
+  response.end(content)
+}
+
+async function handleStaticRequest(request, response) {
+  if (!(await distExists())) {
+    response.writeHead(404, { 'Content-Type': 'text/plain; charset=utf-8' })
+    response.end('dist/ not found. Build the app before starting the combined server.')
+    return
+  }
+
+  const requestUrl = new URL(request.url ?? '/', `http://${request.headers.host ?? `localhost:${PORT}`}`)
+  let filePath = path.join(DIST_DIR, decodeURIComponent(requestUrl.pathname))
+
+  if (requestUrl.pathname === '/') {
+    filePath = path.join(DIST_DIR, 'index.html')
+  }
+
+  try {
+    const stat = await fs.stat(filePath)
+    if (stat.isDirectory()) {
+      await serveFile(response, path.join(filePath, 'index.html'))
+      return
+    }
+    await serveFile(response, filePath)
+    return
+  } catch {
+    if (isAssetRequest(requestUrl.pathname)) {
+      response.writeHead(404, { 'Content-Type': 'text/plain; charset=utf-8' })
+      response.end('Not found.')
+      return
+    }
+  }
+
+  await serveFile(response, path.join(DIST_DIR, 'index.html'))
+}
+
+const server = http.createServer(async (request, response) => {
+  if ((request.url ?? '').startsWith('/dav')) {
+    await handleDavProxy(request, response)
+    return
+  }
+
+  if (request.method !== 'GET' && request.method !== 'HEAD') {
+    response.writeHead(405, { 'Content-Type': 'text/plain; charset=utf-8' })
+    response.end('Method Not Allowed')
+    return
+  }
+
+  await handleStaticRequest(request, response)
 })
 
 server.listen(PORT, () => {
-  console.log(`TaskManagerWebDav proxy listening on http://localhost:${PORT}`)
+  console.log(`TaskManagerWebDav server listening on http://localhost:${PORT}`)
 })

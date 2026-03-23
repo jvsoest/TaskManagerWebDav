@@ -1,0 +1,10 @@
+.git
+.github
+.vscode
+.idea
+node_modules
+dist
+docker-data
+logs
+*.log
+.env
