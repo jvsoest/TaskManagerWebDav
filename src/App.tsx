@@ -122,6 +122,18 @@ function newId(): string {
   return crypto.randomUUID()
 }
 
+function mergeSyncedAndPendingTasks(remoteTasks: TaskItem[], localTasks: TaskItem[]): TaskItem[] {
+  const mergedById = new Map(remoteTasks.map((task) => [task.id, task]))
+
+  localTasks
+    .filter((task) => task.syncState !== 'synced')
+    .forEach((task) => {
+      mergedById.set(task.id, task)
+    })
+
+  return Array.from(mergedById.values())
+}
+
 function normalizeDateInput(value?: string): string {
   if (!value) {
     return ''
@@ -854,19 +866,26 @@ function App() {
         lastError: undefined,
       }
 
-      replaceSnapshot({
-        accounts: [...snapshot.accounts.filter((entry) => entry.id !== account.id), nextAccount],
-        collections: [...snapshot.collections.filter((entry) => entry.accountId !== account.id), ...result.collections],
-        tasks: [...snapshot.tasks.filter((entry) => entry.accountId !== account.id), ...result.tasks],
-        smartLists: [
-          ...snapshot.smartLists.filter((entry) => entry.accountId !== account.id),
-          ...result.smartLists,
-        ],
-        metadataDocs: [
-          ...snapshot.metadataDocs.filter((entry) => entry.accountId !== account.id),
-          result.metadataDoc,
-        ],
-        syncLogs: snapshot.syncLogs,
+      replaceSnapshotWith((current) => {
+        const localAccountTasks = current.tasks.filter((entry) => entry.accountId === account.id)
+
+        return {
+          ...current,
+          accounts: [...current.accounts.filter((entry) => entry.id !== account.id), nextAccount],
+          collections: [...current.collections.filter((entry) => entry.accountId !== account.id), ...result.collections],
+          tasks: [
+            ...current.tasks.filter((entry) => entry.accountId !== account.id),
+            ...mergeSyncedAndPendingTasks(result.tasks, localAccountTasks),
+          ],
+          smartLists: [
+            ...current.smartLists.filter((entry) => entry.accountId !== account.id),
+            ...result.smartLists,
+          ],
+          metadataDocs: [
+            ...current.metadataDocs.filter((entry) => entry.accountId !== account.id),
+            result.metadataDoc,
+          ],
+        }
       })
       setMessage(isFirstSync ? 'Account connected and synced.' : `${account.label} is up to date.`)
     } catch (error) {
