@@ -6,6 +6,7 @@ export type SyncState = 'idle' | 'syncing' | 'synced' | 'error'
 export type TaskOrderMode = 'manual' | 'property'
 export type TaskOrderField = 'dueDate' | 'startDate' | 'priority' | 'title' | 'createdAt' | 'updatedAt' | 'status'
 export type SortDirection = 'asc' | 'desc'
+export type ConnectionMode = 'direct' | 'proxy'
 
 export interface TaskOrdering {
   mode: TaskOrderMode
@@ -17,6 +18,8 @@ export interface Account {
   id: string
   label: string
   serverUrl: string
+  connectionMode: ConnectionMode
+  proxyUrl?: string
   username: string
   password: string
   displayName: string
@@ -128,6 +131,8 @@ export interface AppSnapshot {
 export interface AccountConnectionInput {
   label: string
   serverUrl: string
+  connectionMode: ConnectionMode
+  proxyUrl: string
   username: string
   password: string
 }

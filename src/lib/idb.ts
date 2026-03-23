@@ -1,4 +1,4 @@
-import type { AppSnapshot } from '../types'
+import type { Account, AppSnapshot } from '../types'
 
 const DB_NAME = 'taskmanager-webdav'
 const DB_VERSION = 2
@@ -68,7 +68,11 @@ export async function loadSnapshot(): Promise<AppSnapshot> {
   )
 
   return {
-    accounts,
+    accounts: (accounts as Account[]).map((account) => ({
+      ...account,
+      connectionMode: account.connectionMode ?? 'direct',
+      proxyUrl: account.proxyUrl ?? '',
+    })),
     collections,
     tasks,
     smartLists,

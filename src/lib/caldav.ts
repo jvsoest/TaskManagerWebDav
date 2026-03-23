@@ -19,6 +19,13 @@ import type {
 const METADATA_COLLECTION_NAME = 'taskmanager-meta'
 const SMART_COLLECTION_NAME = 'taskmanager-smart'
 const METADATA_RESOURCE_NAME = 'taskmanager-metadata.ics'
+const MAX_REDIRECTS = 5
+const HIDDEN_COLLECTION_TARGETS = [
+  { kind: 'metadata' as const, slug: METADATA_COLLECTION_NAME, displayName: 'TaskManager Metadata' },
+  { kind: 'smart' as const, slug: SMART_COLLECTION_NAME, displayName: 'TaskManager Smart Lists' },
+]
+
+type DavConnection = Pick<AccountConnectionInput, 'serverUrl' | 'connectionMode' | 'proxyUrl' | 'username' | 'password'>
 
 function isMetadataCollectionUrl(url: string): boolean {
   return (
@@ -34,8 +41,48 @@ function isSmartCollectionUrl(url: string): boolean {
   )
 }
 
+function hiddenCollectionKind(collection: Pick<DiscoveredCollection, 'url' | 'displayName'>): 'metadata' | 'smart' | undefined {
+  if (isMetadataCollectionUrl(collection.url) || collection.displayName === 'TaskManager Metadata') {
+    return 'metadata'
+  }
+
+  if (isSmartCollectionUrl(collection.url) || collection.displayName === 'TaskManager Smart Lists') {
+    return 'smart'
+  }
+
+  return undefined
+}
+
 function authHeader(username: string, password: string): string {
-  return `Basic ${btoa(`${username}:${password}`)}`
+  const bytes = new TextEncoder().encode(`${username}:${password}`)
+  let binary = ''
+
+  bytes.forEach((byte) => {
+    binary += String.fromCharCode(byte)
+  })
+
+  return `Basic ${btoa(binary)}`
+}
+
+function connectionFromAccount(account: Account): DavConnection {
+  return {
+    serverUrl: account.serverUrl,
+    connectionMode: account.connectionMode,
+    proxyUrl: account.proxyUrl ?? '',
+    username: account.username,
+    password: account.password,
+  }
+}
+
+function connectionInputFromAccount(account: Account): AccountConnectionInput {
+  return {
+    label: account.label,
+    serverUrl: account.serverUrl,
+    connectionMode: account.connectionMode,
+    proxyUrl: account.proxyUrl ?? '',
+    username: account.username,
+    password: account.password,
+  }
 }
 
 function ensureTrailingSlash(value: string): string {
@@ -44,6 +91,15 @@ function ensureTrailingSlash(value: string): string {
 
 function resolveUrl(base: string, href: string): string {
   return new URL(href, base).toString()
+}
+
+function responseBaseUrl(response: Response, fallbackUrl: string): string {
+  const forwardedUrl = response.headers.get('x-taskmanager-final-url')
+  if (forwardedUrl) {
+    return forwardedUrl
+  }
+
+  return response.url || fallbackUrl
 }
 
 function textContent(element: Element | null): string | undefined {
@@ -66,22 +122,143 @@ function escapeXml(value: string): string {
     .replace(/'/g, '&apos;')
 }
 
+function firstElementByLocalName(document: XMLDocument, localName: string): Element | null {
+  return Array.from(document.getElementsByTagName('*')).find((element) => element.localName === localName) ?? null
+}
+
+function propertyHref(document: XMLDocument, propertyLocalName: string): string | undefined {
+  const property = firstElementByLocalName(document, propertyLocalName)
+  return property ? textContent(firstDescendant(property, 'href')) : undefined
+}
+
+function isRedirectStatus(status: number): boolean {
+  return [301, 302, 303, 307, 308].includes(status)
+}
+
+function normalizeProxyUrl(proxyUrl: string): string {
+  const trimmed = proxyUrl.trim()
+  return trimmed.endsWith('/') ? trimmed : `${trimmed}/`
+}
+
+function isCirruxServer(serverUrl: string): boolean {
+  try {
+    const hostname = new URL(serverUrl).hostname.toLowerCase()
+    return hostname === 'api.cirrux.co' || hostname.endsWith('.cirrux.co')
+  } catch {
+    return false
+  }
+}
+
+function connectionErrorMessage(connection: DavConnection, error: unknown): string {
+  if (connection.connectionMode === 'direct' && isCirruxServer(connection.serverUrl)) {
+    return 'Cirrux exposes CalDAV for native clients, but blocks direct browser CalDAV from this app origin. Use Proxy mode with https://api.cirrux.co as the server URL and the Cirrux app password.'
+  }
+
+  if (connection.connectionMode === 'direct' && error instanceof TypeError) {
+    return 'Direct browser CalDAV access failed. This provider likely blocks cross-origin DAV requests from this app. Try Proxy mode.'
+  }
+
+  return error instanceof Error ? error.message : 'CalDAV request failed.'
+}
+
+async function proxyRequest(url: string, init: RequestInit, proxyUrl: string): Promise<Response> {
+  const endpoint = new URL('dav', normalizeProxyUrl(proxyUrl)).toString()
+  const headers = new Headers(init.headers)
+  const body = typeof init.body === 'string' ? init.body : undefined
+
+  const response = await fetch(endpoint, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({
+      url,
+      method: init.method ?? 'GET',
+      headers: Object.fromEntries(headers.entries()),
+      body,
+    }),
+  })
+
+  if (!response.ok) {
+    const message = await response.text()
+    throw new Error(`Proxy request failed (${response.status}): ${message}`)
+  }
+
+  const payload = (await response.json()) as {
+    status: number
+    headers?: Record<string, string>
+    body?: string
+    url?: string
+  }
+
+  const responseHeaders = new Headers(payload.headers ?? {})
+  if (payload.url) {
+    responseHeaders.set('x-taskmanager-final-url', payload.url)
+  }
+
+  const responseBody =
+    [101, 103, 204, 205, 304].includes(payload.status) || payload.body === undefined
+      ? null
+      : payload.body
+
+  return new Response(responseBody, {
+    status: payload.status,
+    headers: responseHeaders,
+  })
+}
+
+async function directRequest(url: string, init: RequestInit): Promise<Response> {
+  let currentUrl = url
+
+  for (let redirects = 0; redirects <= MAX_REDIRECTS; redirects += 1) {
+    const response = await fetch(currentUrl, {
+      ...init,
+      redirect: 'manual',
+    })
+
+    if (!isRedirectStatus(response.status)) {
+      return response
+    }
+
+    const location = response.headers.get('location') ?? response.headers.get('Location')
+    if (!location) {
+      return response
+    }
+
+    currentUrl = new URL(location, currentUrl).toString()
+  }
+
+  throw new Error(`Too many redirects while requesting ${url}.`)
+}
+
 async function davRequest(
+  connection: DavConnection,
   url: string,
-  init: RequestInit & { depth?: '0' | '1' } = {},
+  init: RequestInit & { depth?: '0' | '1'; allowStatuses?: number[] } = {},
 ): Promise<Response> {
   const headers = new Headers(init.headers)
   if (init.depth) {
     headers.set('Depth', init.depth)
   }
-  headers.set('Content-Type', headers.get('Content-Type') ?? 'application/xml; charset=utf-8')
+  if (init.body && !headers.has('Content-Type')) {
+    headers.set('Content-Type', 'application/xml; charset=utf-8')
+  }
 
-  const response = await fetch(url, {
-    ...init,
-    headers,
-  })
+  let response: Response
+  try {
+    if (connection.connectionMode === 'proxy') {
+      if (!connection.proxyUrl.trim()) {
+        throw new Error('Proxy URL is required for Proxy mode.')
+      }
+      response = await proxyRequest(url, { ...init, headers }, connection.proxyUrl)
+    } else {
+      response = await directRequest(url, { ...init, headers })
+    }
+  } catch (error) {
+    throw new Error(connectionErrorMessage(connection, error))
+  }
 
-  if (!response.ok && response.status !== 207) {
+  if (!response.ok && response.status !== 207 && !init.allowStatuses?.includes(response.status)) {
     const message = await response.text()
     throw new Error(`${init.method ?? 'GET'} ${url} failed (${response.status}): ${message}`)
   }
@@ -138,12 +315,13 @@ function parseMultiStatus(xmlText: string, baseUrl: string): DiscoveredCollectio
 }
 
 async function propfind(
+  connection: DavConnection,
   url: string,
   authorization: string,
   body: string,
   depth: '0' | '1',
 ): Promise<DiscoveredCollection[]> {
-  const response = await davRequest(url, {
+  const response = await davRequest(connection, url, {
     method: 'PROPFIND',
     depth,
     headers: {
@@ -152,11 +330,11 @@ async function propfind(
     body,
   })
 
-  return parseMultiStatus(await response.text(), url)
+  return parseMultiStatus(await response.text(), responseBaseUrl(response, url))
 }
 
-async function fetchResourceEtag(url: string, authorization: string): Promise<string | undefined> {
-  const response = await davRequest(url, {
+async function fetchResourceEtag(connection: DavConnection, url: string, authorization: string): Promise<string | undefined> {
+  const response = await davRequest(connection, url, {
     method: 'PROPFIND',
     depth: '0',
     headers: {
@@ -179,50 +357,41 @@ async function fetchResourceEtag(url: string, authorization: string): Promise<st
 }
 
 async function discoverHomeSet(input: AccountConnectionInput): Promise<{ displayName: string; homeSetUrl: string }> {
+  if (input.connectionMode === 'direct' && isCirruxServer(input.serverUrl)) {
+    throw new Error(connectionErrorMessage(input, new Error('Cirrux requires proxy mode.')))
+  }
+
   const authorization = authHeader(input.username, input.password)
   const serverUrl = ensureTrailingSlash(input.serverUrl)
-  const rootResponse = await davRequest(serverUrl, {
+  const rootResponse = await davRequest(input, serverUrl, {
     method: 'PROPFIND',
     depth: '0',
     headers: {
       Authorization: authorization,
     },
     body: `<?xml version="1.0" encoding="utf-8" ?>
-      <d:propfind xmlns:d="DAV:" xmlns:cs="http://calendarserver.org/ns/">
+      <d:propfind xmlns:d="DAV:" xmlns:c="urn:ietf:params:xml:ns:caldav">
         <d:prop>
           <d:displayname />
           <d:current-user-principal />
-          <cs:calendar-home-set />
+          <c:calendar-home-set />
         </d:prop>
       </d:propfind>`,
   })
+  const rootBaseUrl = responseBaseUrl(rootResponse, serverUrl)
 
   const rootXml = new DOMParser().parseFromString(await rootResponse.text(), 'application/xml')
-  const rootDisplayName = textContent(
-    Array.from(rootXml.getElementsByTagName('*')).find((element) => element.localName === 'displayname') ?? null,
-  )
-  const rootHomeSet = textContent(
-    firstDescendant(
-      Array.from(rootXml.getElementsByTagName('*')).find((element) => element.localName === 'calendar-home-set') ??
-        rootXml.documentElement,
-      'href',
-    ),
-  )
+  const rootDisplayName = textContent(firstElementByLocalName(rootXml, 'displayname'))
+  const rootHomeSet = propertyHref(rootXml, 'calendar-home-set')
 
   if (rootHomeSet) {
     return {
       displayName: rootDisplayName ?? input.label ?? input.username,
-      homeSetUrl: ensureTrailingSlash(resolveUrl(serverUrl, rootHomeSet)),
+      homeSetUrl: ensureTrailingSlash(resolveUrl(rootBaseUrl, rootHomeSet)),
     }
   }
 
-  const principalHref = textContent(
-    firstDescendant(
-      Array.from(rootXml.getElementsByTagName('*')).find((element) => element.localName === 'current-user-principal') ??
-        rootXml.documentElement,
-      'href',
-    ),
-  )
+  const principalHref = propertyHref(rootXml, 'current-user-principal')
 
   if (!principalHref) {
     return {
@@ -231,48 +400,42 @@ async function discoverHomeSet(input: AccountConnectionInput): Promise<{ display
     }
   }
 
-  const principalUrl = resolveUrl(serverUrl, principalHref)
-  const principalResponse = await davRequest(principalUrl, {
+  const principalUrl = resolveUrl(rootBaseUrl, principalHref)
+  const principalResponse = await davRequest(input, principalUrl, {
     method: 'PROPFIND',
     depth: '0',
     headers: {
       Authorization: authorization,
     },
     body: `<?xml version="1.0" encoding="utf-8" ?>
-      <d:propfind xmlns:d="DAV:" xmlns:cs="http://calendarserver.org/ns/">
+      <d:propfind xmlns:d="DAV:" xmlns:c="urn:ietf:params:xml:ns:caldav">
         <d:prop>
           <d:displayname />
-          <cs:calendar-home-set />
+          <c:calendar-home-set />
         </d:prop>
       </d:propfind>`,
   })
+  const principalBaseUrl = responseBaseUrl(principalResponse, principalUrl)
 
   const principalXml = new DOMParser().parseFromString(await principalResponse.text(), 'application/xml')
   const displayName =
-    textContent(
-      Array.from(principalXml.getElementsByTagName('*')).find((element) => element.localName === 'displayname') ?? null,
-    ) ??
+    textContent(firstElementByLocalName(principalXml, 'displayname')) ??
     rootDisplayName ??
     input.label ??
     input.username
 
-  const homeSetHref = textContent(
-    firstDescendant(
-      Array.from(principalXml.getElementsByTagName('*')).find((element) => element.localName === 'calendar-home-set') ??
-        principalXml.documentElement,
-      'href',
-    ),
-  )
+  const homeSetHref = propertyHref(principalXml, 'calendar-home-set')
 
   return {
     displayName,
-    homeSetUrl: ensureTrailingSlash(resolveUrl(principalUrl, homeSetHref ?? './')),
+    homeSetUrl: ensureTrailingSlash(resolveUrl(principalBaseUrl, homeSetHref ?? './')),
   }
 }
 
-async function mkcalendar(url: string, authorization: string, displayName: string): Promise<void> {
-  const response = await fetch(url, {
+async function mkcalendar(connection: DavConnection, url: string, authorization: string, displayName: string): Promise<string> {
+  const response = await davRequest(connection, url, {
     method: 'MKCALENDAR',
+    allowStatuses: [405],
     headers: {
       Authorization: authorization,
       'Content-Type': 'application/xml; charset=utf-8',
@@ -294,27 +457,74 @@ async function mkcalendar(url: string, authorization: string, displayName: strin
     const message = await response.text()
     throw new Error(`MKCALENDAR ${url} failed (${response.status}): ${message}`)
   }
+
+  const location = response.headers.get('location') ?? response.headers.get('Location')
+  if (location) {
+    return ensureTrailingSlash(resolveUrl(url, location))
+  }
+
+  return ensureTrailingSlash(url)
+}
+
+async function isCollectionAccessible(
+  connection: DavConnection,
+  url: string,
+  authorization: string,
+): Promise<boolean> {
+  try {
+    const response = await davRequest(connection, ensureTrailingSlash(url), {
+      method: 'PROPFIND',
+      depth: '0',
+      allowStatuses: [404],
+      headers: {
+        Authorization: authorization,
+      },
+      body: `<?xml version="1.0" encoding="utf-8" ?>
+        <d:propfind xmlns:d="DAV:">
+          <d:prop>
+            <d:displayname />
+          </d:prop>
+        </d:propfind>`,
+    })
+    return response.status !== 404
+  } catch {
+    return false
+  }
 }
 
 async function ensureHiddenCollections(
+  connection: DavConnection,
   homeSetUrl: string,
   authorization: string,
   collections: DiscoveredCollection[],
 ): Promise<DiscoveredCollection[]> {
-  const knownUrls = new Set(collections.map((collection) => ensureTrailingSlash(collection.url)))
-  const required = [
-    { slug: METADATA_COLLECTION_NAME, displayName: 'TaskManager Metadata' },
-    { slug: SMART_COLLECTION_NAME, displayName: 'TaskManager Smart Lists' },
-  ]
+  for (const target of HIDDEN_COLLECTION_TARGETS) {
+    const candidates = collections.filter((collection) => hiddenCollectionKind(collection) === target.kind)
+    let hasUsableCandidate = false
 
-  for (const target of required) {
-    const collectionUrl = ensureTrailingSlash(resolveUrl(homeSetUrl, `${target.slug}/`))
-    if (!knownUrls.has(collectionUrl)) {
-      await mkcalendar(collectionUrl, authorization, target.displayName)
+    for (const candidate of candidates) {
+      if (await isCollectionAccessible(connection, candidate.url, authorization)) {
+        hasUsableCandidate = true
+        break
+      }
+    }
+
+    if (hasUsableCandidate) {
+      continue
+    }
+
+    const preferredUrl = ensureTrailingSlash(resolveUrl(homeSetUrl, `${target.slug}/`))
+    try {
+      await mkcalendar(connection, preferredUrl, authorization, target.displayName)
+    } catch (error) {
+      const fallbackSlug = `${target.slug}-${crypto.randomUUID().slice(0, 8)}`
+      const fallbackUrl = ensureTrailingSlash(resolveUrl(homeSetUrl, `${fallbackSlug}/`))
+      await mkcalendar(connection, fallbackUrl, authorization, target.displayName)
     }
   }
 
   return propfind(
+    connection,
     homeSetUrl,
     authorization,
     `<?xml version="1.0" encoding="utf-8" ?>
@@ -337,6 +547,7 @@ export async function discoverAccount(
   const authorization = authHeader(input.username, input.password)
   const { displayName, homeSetUrl } = await discoverHomeSet(input)
   const collections = await propfind(
+    input,
     homeSetUrl,
     authorization,
     `<?xml version="1.0" encoding="utf-8" ?>
@@ -351,22 +562,39 @@ export async function discoverAccount(
     '1',
   )
 
-  const refreshedCollections = await ensureHiddenCollections(homeSetUrl, authorization, collections)
+  const refreshedCollections = await ensureHiddenCollections(input, homeSetUrl, authorization, collections)
+
+  const accessibleHiddenUrls = new Map<'metadata' | 'smart', string>()
+  for (const target of HIDDEN_COLLECTION_TARGETS) {
+    const candidates = refreshedCollections.filter((collection) => hiddenCollectionKind(collection) === target.kind)
+    for (const candidate of candidates) {
+      if (await isCollectionAccessible(input, candidate.url, authorization)) {
+        accessibleHiddenUrls.set(target.kind, ensureTrailingSlash(candidate.url))
+        break
+      }
+    }
+  }
 
   return {
     accountDisplayName: displayName,
     collections: refreshedCollections
       .filter((collection) => collection.isCalendar && collection.supportsVtodo)
+      .filter((collection) => {
+        const kind = hiddenCollectionKind(collection)
+        if (!kind) {
+          return true
+        }
+        return accessibleHiddenUrls.get(kind) === ensureTrailingSlash(collection.url)
+      })
       .map((collection) => {
         const url = ensureTrailingSlash(collection.url)
-        const isMetadata = isMetadataCollectionUrl(url)
-        const isSmart = isSmartCollectionUrl(url)
+        const kind = hiddenCollectionKind({ url, displayName: collection.displayName })
         return {
           id: `${accountId}:${url}`,
           accountId,
           url,
           displayName: collection.displayName,
-          kind: isMetadata ? 'metadata' : isSmart ? 'smart' : 'task',
+          kind: kind ?? 'task',
           syncToken: collection.syncToken,
         } as TaskCollection
       }),
@@ -385,14 +613,10 @@ function slugifyCollectionName(name: string): string {
 
 export async function createTaskCollection(account: Account, displayName: string): Promise<TaskCollection> {
   const authorization = authHeader(account.username, account.password)
-  const { homeSetUrl } = await discoverHomeSet({
-    label: account.label,
-    serverUrl: account.serverUrl,
-    username: account.username,
-    password: account.password,
-  })
+  const { homeSetUrl } = await discoverHomeSet(connectionInputFromAccount(account))
 
   const collections = await propfind(
+    connectionFromAccount(account),
     homeSetUrl,
     authorization,
     `<?xml version="1.0" encoding="utf-8" ?>
@@ -419,24 +643,43 @@ export async function createTaskCollection(account: Account, displayName: string
     targetUrl = ensureTrailingSlash(resolveUrl(homeSetUrl, `${slug}/`))
   }
 
-  await mkcalendar(targetUrl, authorization, displayName.trim())
+  const actualUrl = await mkcalendar(connectionFromAccount(account), targetUrl, authorization, displayName.trim())
 
   return {
-    id: `${account.id}:${targetUrl}`,
+    id: `${account.id}:${actualUrl}`,
     accountId: account.id,
-    url: targetUrl,
+    url: actualUrl,
     displayName: displayName.trim(),
     kind: 'task',
   }
 }
 
 export async function deleteTaskCollection(account: Account, collection: TaskCollection): Promise<void> {
-  const response = await fetch(collection.url, {
+  const connection = connectionFromAccount(account)
+  const authorization = authHeader(account.username, account.password)
+  let response = await davRequest(connection, collection.url, {
     method: 'DELETE',
+    allowStatuses: [404],
     headers: {
-      Authorization: authHeader(account.username, account.password),
+      Authorization: authorization,
     },
   })
+
+  if (response.status === 404) {
+    const rediscovered = await discoverAccount(connectionInputFromAccount(account), account.id)
+    const refreshedCollection = rediscovered.collections.find(
+      (entry) => entry.kind === 'task' && entry.displayName === collection.displayName,
+    )
+    if (refreshedCollection && refreshedCollection.url !== collection.url) {
+      response = await davRequest(connection, refreshedCollection.url, {
+        method: 'DELETE',
+        allowStatuses: [404],
+        headers: {
+          Authorization: authorization,
+        },
+      })
+    }
+  }
 
   if (!response.ok && response.status !== 404) {
     const message = await response.text()
@@ -587,8 +830,12 @@ function parseCalendarObjects(xmlText: string, baseUrl: string): CalendarObject[
     }, [])
 }
 
-async function fetchCollectionObjects(collection: TaskCollection, authorization: string): Promise<CalendarObject[]> {
-  const response = await davRequest(collection.url, {
+async function fetchCollectionObjectsForConnection(
+  connection: DavConnection,
+  collection: TaskCollection,
+  authorization: string,
+): Promise<CalendarObject[]> {
+  const response = await davRequest(connection, collection.url, {
     method: 'REPORT',
     depth: '1',
     headers: {
@@ -609,6 +856,30 @@ async function fetchCollectionObjects(collection: TaskCollection, authorization:
   })
 
   return parseCalendarObjects(await response.text(), collection.url)
+}
+
+async function fetchTaskLocationAndEtag(
+  connection: DavConnection,
+  collection: TaskCollection,
+  authorization: string,
+  uid: string,
+): Promise<{ url: string; etag?: string } | undefined> {
+  const objects = await fetchCollectionObjectsForConnection(connection, collection, authorization)
+  const matched = objects.find((entry) => {
+    if (entry.href.endsWith(`${uid}.ics`)) {
+      return true
+    }
+
+    const parsed = parseTaskFromIcs(entry.payload ?? '', collection.accountId, collection.id)
+    return parsed?.uid === uid
+  })
+
+  return matched
+    ? {
+        url: matched.href,
+        etag: matched.etag,
+      }
+    : undefined
 }
 
 function serializeMetadataDocument(doc: MetadataDocument, taskCollections: TaskCollection[]): string {
@@ -784,6 +1055,7 @@ function taskToIcs(task: TaskItem, metadataDoc: MetadataDocument): string {
 
 export async function syncAccount(account: Account, collections: TaskCollection[]): Promise<SyncResult> {
   const authorization = authHeader(account.username, account.password)
+  const connection = connectionFromAccount(account)
   const metadataCollection = collections.find((collection) => collection.kind === 'metadata')
   const smartCollection = collections.find((collection) => collection.kind === 'smart')
   const taskCollections = collections.filter((collection) => collection.kind === 'task')
@@ -791,7 +1063,7 @@ export async function syncAccount(account: Account, collections: TaskCollection[
     throw new Error('Required hidden TaskManager collections are missing.')
   }
 
-  const metadataEntries = await fetchCollectionObjects(metadataCollection, authorization)
+  const metadataEntries = await fetchCollectionObjectsForConnection(connection, metadataCollection, authorization)
   const metadataEntry =
     metadataEntries.find((entry) => entry.href.endsWith(METADATA_RESOURCE_NAME)) ?? metadataEntries[0]
   const defaultMetadata = createDefaultMetadata(account.id)
@@ -816,7 +1088,7 @@ export async function syncAccount(account: Account, collections: TaskCollection[
 
   const taskLists = await Promise.all(
     taskCollections.map(async (collection) => {
-      const objects = await fetchCollectionObjects(collection, authorization)
+      const objects = await fetchCollectionObjectsForConnection(connection, collection, authorization)
       return objects.reduce<TaskItem[]>((entries, entry) => {
         const task = parseTaskFromIcs(entry.payload ?? '', account.id, collection.id)
         if (task) {
@@ -832,7 +1104,7 @@ export async function syncAccount(account: Account, collections: TaskCollection[
     }),
   )
 
-  const smartEntries = await fetchCollectionObjects(smartCollection, authorization)
+  const smartEntries = await fetchCollectionObjectsForConnection(connection, smartCollection, authorization)
   const smartLists = smartEntries.reduce<SmartList[]>((entries, entry) => {
       const task = parseTaskFromIcs(entry.payload ?? '', account.id, smartCollection.id)
       if (!task) {
@@ -869,6 +1141,7 @@ export async function upsertTaskRemote(
   task: TaskItem,
   metadataDoc: MetadataDocument,
 ): Promise<{ url: string; etag?: string }> {
+  const connection = connectionFromAccount(account)
   const url = task.url ?? resolveUrl(collection.url, `${task.uid}.ics`)
   const authorization = authHeader(account.username, account.password)
   const headers: Record<string, string> = {
@@ -882,7 +1155,7 @@ export async function upsertTaskRemote(
     headers['If-None-Match'] = '*'
   }
 
-  const response = await fetch(url, {
+  const response = await davRequest(connection, url, {
     method: 'PUT',
     headers,
     body: taskToIcs(task, metadataDoc),
@@ -893,14 +1166,30 @@ export async function upsertTaskRemote(
     throw new Error(`Task save failed (${response.status}): ${message}`)
   }
 
-  const etag =
-    response.headers.get('etag') ??
-    response.headers.get('ETag') ??
-    (await fetchResourceEtag(url, authorization)) ??
-    undefined
+  let remoteUrl = url
+  let etag = response.headers.get('etag') ?? response.headers.get('ETag') ?? undefined
+
+  if (!etag) {
+    try {
+      etag = (await fetchResourceEtag(connection, url, authorization)) ?? undefined
+    } catch (error) {
+      const isNotFound = error instanceof Error && error.message.includes('PROPFIND') && error.message.includes('(404)')
+      if (!isNotFound) {
+        throw error
+      }
+    }
+  }
+
+  if (!etag) {
+    const discovered = await fetchTaskLocationAndEtag(connection, collection, authorization, task.uid)
+    if (discovered) {
+      remoteUrl = discovered.url
+      etag = discovered.etag
+    }
+  }
 
   return {
-    url,
+    url: remoteUrl,
     etag,
   }
 }
@@ -918,8 +1207,10 @@ export async function deleteTaskRemote(account: Account, task: TaskItem): Promis
     headers['If-Match'] = task.etag
   }
 
-  const response = await fetch(task.url, {
+  const connection = connectionFromAccount(account)
+  const response = await davRequest(connection, task.url, {
     method: 'DELETE',
+    allowStatuses: [404],
     headers,
   })
 
@@ -935,25 +1226,53 @@ export async function saveMetadataRemote(
   metadataDoc: MetadataDocument,
   taskCollections: TaskCollection[],
 ): Promise<{ url: string; etag?: string }> {
-  const url = metadataDoc.url ?? resolveUrl(collection.url, METADATA_RESOURCE_NAME)
-  const metadataTaskItem = (etag = metadataDoc.etag): TaskItem => ({
-    ...metadataTask(metadataDoc, collection.id, taskCollections),
-    url,
+  const metadataTaskItem = (
+    targetCollection: TaskCollection,
+    targetDoc: MetadataDocument,
+    targetUrl = targetDoc.url ?? resolveUrl(targetCollection.url, METADATA_RESOURCE_NAME),
+    etag = targetDoc.etag,
+  ): TaskItem => ({
+    ...metadataTask(targetDoc, targetCollection.id, taskCollections),
+    url: targetUrl,
     etag,
   })
 
   try {
-    return await upsertTaskRemote(account, collection, metadataTaskItem(), metadataDoc)
+    return await upsertTaskRemote(account, collection, metadataTaskItem(collection, metadataDoc), metadataDoc)
   } catch (error) {
+    const isNotFoundFailure =
+      error instanceof Error && error.message.includes('Task save failed (404)')
     const isPreconditionFailure =
       error instanceof Error && error.message.includes('Task save failed (412)')
+
+    if (isNotFoundFailure) {
+      const rediscovered = await discoverAccount(connectionInputFromAccount(account), account.id)
+      const refreshedCollection = rediscovered.collections.find((entry) => entry.kind === 'metadata')
+      if (!refreshedCollection) {
+        throw error
+      }
+
+      const refreshedDoc = {
+        ...metadataDoc,
+        url: resolveUrl(refreshedCollection.url, METADATA_RESOURCE_NAME),
+        etag: undefined,
+      }
+
+      return upsertTaskRemote(
+        account,
+        refreshedCollection,
+        metadataTaskItem(refreshedCollection, refreshedDoc),
+        refreshedDoc,
+      )
+    }
 
     if (!isPreconditionFailure) {
       throw error
     }
 
-    const latestEtag = await fetchResourceEtag(url, authHeader(account.username, account.password))
-    return upsertTaskRemote(account, collection, metadataTaskItem(latestEtag), metadataDoc)
+    const url = metadataDoc.url ?? resolveUrl(collection.url, METADATA_RESOURCE_NAME)
+    const latestEtag = await fetchResourceEtag(connectionFromAccount(account), url, authHeader(account.username, account.password))
+    return upsertTaskRemote(account, collection, metadataTaskItem(collection, metadataDoc, url, latestEtag), metadataDoc)
   }
 }
 

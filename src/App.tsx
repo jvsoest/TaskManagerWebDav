@@ -63,6 +63,16 @@ type DragSession = {
   height: number
 }
 
+type PendingTaskPress = {
+  taskId: string
+  pointerX: number
+  pointerY: number
+  offsetX: number
+  offsetY: number
+  width: number
+  height: number
+}
+
 const emptySnapshot: AppSnapshot = {
   accounts: [],
   collections: [],
@@ -75,6 +85,8 @@ const emptySnapshot: AppSnapshot = {
 const emptyConnection: AccountConnectionInput = {
   label: '',
   serverUrl: '',
+  connectionMode: 'direct',
+  proxyUrl: '',
   username: '',
   password: '',
 }
@@ -295,11 +307,13 @@ function App() {
   const [isSmartEditorOpen, setIsSmartEditorOpen] = useState(false)
   const [collapsedFolders, setCollapsedFolders] = useState<string[]>([])
   const [dragSession, setDragSession] = useState<DragSession>()
+  const [pendingTaskPress, setPendingTaskPress] = useState<PendingTaskPress>()
   const [dropIndex, setDropIndex] = useState<number>()
   const [workspaceMode, setWorkspaceMode] = useState<WorkspaceMode>('tasks')
   const [settingsSection, setSettingsSection] = useState<SettingsSection>('accounts')
   const deliveredRef = useRef<Set<string>>(new Set())
   const taskRowsRef = useRef<Map<string, HTMLDivElement>>(new Map())
+  const suppressTaskClickRef = useRef(false)
   const deferredSearch = useDeferredValue(searchText)
 
   useEffect(() => {
@@ -614,9 +628,8 @@ function App() {
     }
 
     const rect = row.getBoundingClientRect()
-    event.preventDefault()
 
-    setDragSession({
+    setPendingTaskPress({
       taskId: task.id,
       pointerX: event.clientX,
       pointerY: event.clientY,
@@ -626,6 +639,52 @@ function App() {
       height: rect.height,
     })
   }
+
+  useEffect(() => {
+    if (!pendingTaskPress) {
+      return
+    }
+
+    const press = pendingTaskPress
+
+    function clearPendingTaskPress() {
+      setPendingTaskPress(undefined)
+    }
+
+    function handlePointerMove(event: PointerEvent) {
+      const deltaX = event.clientX - press.pointerX
+      const deltaY = event.clientY - press.pointerY
+      if (Math.hypot(deltaX, deltaY) < 6) {
+        return
+      }
+
+      suppressTaskClickRef.current = true
+      setDragSession({
+        taskId: press.taskId,
+        pointerX: event.clientX,
+        pointerY: event.clientY,
+        offsetX: press.offsetX,
+        offsetY: press.offsetY,
+        width: press.width,
+        height: press.height,
+      })
+      clearPendingTaskPress()
+    }
+
+    function handlePointerEnd() {
+      clearPendingTaskPress()
+    }
+
+    window.addEventListener('pointermove', handlePointerMove)
+    window.addEventListener('pointerup', handlePointerEnd)
+    window.addEventListener('pointercancel', handlePointerEnd)
+
+    return () => {
+      window.removeEventListener('pointermove', handlePointerMove)
+      window.removeEventListener('pointerup', handlePointerEnd)
+      window.removeEventListener('pointercancel', handlePointerEnd)
+    }
+  }, [pendingTaskPress])
 
   const recordSyncIssue = useCallback(
     (source: string, failure: string, accountId = activeAccountId) => {
@@ -730,6 +789,11 @@ function App() {
       return
     }
 
+    if (connectionForm.connectionMode === 'proxy' && !connectionForm.proxyUrl.trim()) {
+      setMessage('Proxy URL is required when using Proxy mode.')
+      return
+    }
+
     const accountId = newId()
     setBusy(true)
     setMessage('Discovering task collections...')
@@ -740,6 +804,8 @@ function App() {
         id: accountId,
         label: connectionForm.label || discovery.accountDisplayName || connectionForm.username,
         serverUrl: connectionForm.serverUrl,
+        connectionMode: connectionForm.connectionMode,
+        proxyUrl: connectionForm.connectionMode === 'proxy' ? connectionForm.proxyUrl.trim() : undefined,
         username: connectionForm.username,
         password: connectionForm.password,
         displayName: discovery.accountDisplayName,
@@ -1950,6 +2016,18 @@ function App() {
                     </div>
 
                     <div className="settings-form">
+                      <select
+                        value={connectionForm.connectionMode}
+                        onChange={(event) =>
+                          setConnectionForm((current) => ({
+                            ...current,
+                            connectionMode: event.target.value as AccountConnectionInput['connectionMode'],
+                          }))
+                        }
+                      >
+                        <option value="direct">Direct CalDAV</option>
+                        <option value="proxy">CalDAV via Proxy</option>
+                      </select>
                       <input
                         value={connectionForm.label}
                         onChange={(event) =>
@@ -1964,6 +2042,15 @@ function App() {
                         }
                         placeholder="Server URL"
                       />
+                      {connectionForm.connectionMode === 'proxy' && (
+                        <input
+                          value={connectionForm.proxyUrl}
+                          onChange={(event) =>
+                            setConnectionForm((current) => ({ ...current, proxyUrl: event.target.value }))
+                          }
+                          placeholder="Proxy base URL"
+                        />
+                      )}
                       <input
                         value={connectionForm.username}
                         onChange={(event) =>
@@ -1982,6 +2069,26 @@ function App() {
                       <button className="primary-button" onClick={() => void handleConnectAccount()} disabled={busy}>
                         Connect account
                       </button>
+                    </div>
+
+                    <div className="settings-block">
+                      <div className="section-title-row">
+                        <h4>Connection notes</h4>
+                      </div>
+                      <div className="stack-list">
+                        <div className="simple-row">
+                          <div>
+                            <strong>Direct mode</strong>
+                            <span>Use this for CalDAV servers that allow browser CORS access from this app.</span>
+                          </div>
+                        </div>
+                        <div className="simple-row">
+                          <div>
+                            <strong>Proxy mode</strong>
+                            <span>Use this for providers like Cirrux that support CalDAV, but block direct browser DAV requests.</span>
+                          </div>
+                        </div>
+                      </div>
                     </div>
 
                     <div className="settings-block">
@@ -2258,6 +2365,13 @@ function App() {
                         className={`task-row ${task.id === selectedTaskId ? 'selected' : ''} ${
                           task.status === 'completed' ? 'done' : ''
                         } ${canManualReorderTasks && task.status !== 'completed' ? 'reorderable' : ''}`}
+                        onClick={() => {
+                          if (suppressTaskClickRef.current) {
+                            suppressTaskClickRef.current = false
+                            return
+                          }
+                          openTask(task.id)
+                        }}
                         onPointerDown={(event) => {
                           const target = event.target as HTMLElement
                           if (
@@ -2274,11 +2388,14 @@ function App() {
                         )}
                         <button
                           className={`task-check ${task.status === 'completed' ? 'checked' : ''}`}
-                          onClick={() => void handleToggleTaskStatus(task)}
+                          onClick={(event) => {
+                            event.stopPropagation()
+                            void handleToggleTaskStatus(task)
+                          }}
                         >
                           {task.status === 'completed' ? 'x' : ''}
                         </button>
-                        <button className="task-main" onClick={() => openTask(task.id)}>
+                        <button className="task-main" onClick={(event) => event.preventDefault()}>
                           <span className="task-title">{task.title || 'Untitled task'}</span>
                           <span className="task-subline">{task.notes || 'No description'}</span>
                         </button>
