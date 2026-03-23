@@ -23,6 +23,7 @@ import {
   upsertSmartListRemote,
   upsertTaskRemote,
 } from './lib/caldav'
+import { newUuid } from './lib/ids'
 import type {
   Account,
   AccountConnectionInput,
@@ -119,7 +120,7 @@ function createDraft(collectionId?: string, accountId?: string): TaskDraft {
 }
 
 function newId(): string {
-  return crypto.randomUUID()
+  return newUuid()
 }
 
 function mergeSyncedAndPendingTasks(remoteTasks: TaskItem[], localTasks: TaskItem[]): TaskItem[] {

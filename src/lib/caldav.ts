@@ -5,6 +5,7 @@ import {
   parseSmartListPayload,
   serializeSmartListPayload,
 } from './filters'
+import { newUuid } from './ids'
 import type {
   Account,
   AccountConnectionInput,
@@ -528,7 +529,7 @@ async function ensureHiddenCollections(
     try {
       await mkcalendar(connection, preferredUrl, authorization, target.displayName)
     } catch (error) {
-      const fallbackSlug = `${target.slug}-${crypto.randomUUID().slice(0, 8)}`
+      const fallbackSlug = `${target.slug}-${newUuid().slice(0, 8)}`
       const fallbackUrl = ensureTrailingSlash(resolveUrl(homeSetUrl, `${fallbackSlug}/`))
       await mkcalendar(connection, fallbackUrl, authorization, target.displayName)
     }
