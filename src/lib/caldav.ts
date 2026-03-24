@@ -289,6 +289,7 @@ async function davRequest(
 interface DiscoveredCollection {
   url: string
   displayName: string
+  color?: string
   isCalendar: boolean
   supportsVtodo: boolean
   syncToken?: string
@@ -325,6 +326,9 @@ function parseMultiStatus(xmlText: string, baseUrl: string): DiscoveredCollectio
       entries.push({
         url: resolveUrl(baseUrl, href),
         displayName: textContent(firstDescendant(prop, 'displayname')) ?? href,
+        color:
+          textContent(firstDescendant(prop, 'calendar-color')) ??
+          textContent(firstDescendant(prop, 'color')),
         isCalendar,
         supportsVtodo,
         syncToken: textContent(firstDescendant(prop, 'sync-token')),
@@ -390,7 +394,7 @@ async function discoverHomeSet(input: AccountConnectionInput): Promise<{ display
       Authorization: authorization,
     },
     body: `<?xml version="1.0" encoding="utf-8" ?>
-      <d:propfind xmlns:d="DAV:" xmlns:c="urn:ietf:params:xml:ns:caldav">
+      <d:propfind xmlns:d="DAV:" xmlns:c="urn:ietf:params:xml:ns:caldav" xmlns:a="http://apple.com/ns/ical/">
         <d:prop>
           <d:displayname />
           <d:current-user-principal />
@@ -428,7 +432,7 @@ async function discoverHomeSet(input: AccountConnectionInput): Promise<{ display
       Authorization: authorization,
     },
     body: `<?xml version="1.0" encoding="utf-8" ?>
-      <d:propfind xmlns:d="DAV:" xmlns:c="urn:ietf:params:xml:ns:caldav">
+      <d:propfind xmlns:d="DAV:" xmlns:c="urn:ietf:params:xml:ns:caldav" xmlns:a="http://apple.com/ns/ical/">
         <d:prop>
           <d:displayname />
           <c:calendar-home-set />
@@ -555,9 +559,10 @@ async function ensureHiddenCollections(
     homeSetUrl,
     authorization,
     `<?xml version="1.0" encoding="utf-8" ?>
-      <d:propfind xmlns:d="DAV:" xmlns:c="urn:ietf:params:xml:ns:caldav">
+      <d:propfind xmlns:d="DAV:" xmlns:c="urn:ietf:params:xml:ns:caldav" xmlns:a="http://apple.com/ns/ical/">
         <d:prop>
           <d:displayname />
+          <a:calendar-color />
           <d:resourcetype />
           <d:sync-token />
           <c:supported-calendar-component-set />
@@ -578,9 +583,10 @@ export async function discoverAccount(
     homeSetUrl,
     authorization,
     `<?xml version="1.0" encoding="utf-8" ?>
-      <d:propfind xmlns:d="DAV:" xmlns:c="urn:ietf:params:xml:ns:caldav">
+      <d:propfind xmlns:d="DAV:" xmlns:c="urn:ietf:params:xml:ns:caldav" xmlns:a="http://apple.com/ns/ical/">
         <d:prop>
           <d:displayname />
+          <a:calendar-color />
           <d:resourcetype />
           <d:sync-token />
           <c:supported-calendar-component-set />
@@ -621,6 +627,7 @@ export async function discoverAccount(
           accountId,
           url,
           displayName: collection.displayName,
+          color: collection.color,
           kind: kind ?? 'task',
           syncToken: collection.syncToken,
         } as TaskCollection
@@ -668,9 +675,10 @@ export async function createTaskCollection(account: Account, displayName: string
     homeSetUrl,
     authorization,
     `<?xml version="1.0" encoding="utf-8" ?>
-      <d:propfind xmlns:d="DAV:" xmlns:c="urn:ietf:params:xml:ns:caldav">
+      <d:propfind xmlns:d="DAV:" xmlns:c="urn:ietf:params:xml:ns:caldav" xmlns:a="http://apple.com/ns/ical/">
         <d:prop>
           <d:displayname />
+          <a:calendar-color />
           <d:resourcetype />
           <d:sync-token />
           <c:supported-calendar-component-set />
@@ -693,7 +701,43 @@ export async function createTaskCollection(account: Account, displayName: string
     accountId: account.id,
     url: actualUrl,
     displayName: displayName.trim(),
+    color: undefined,
     kind: 'task',
+  }
+}
+
+export async function renameTaskCollection(
+  account: Account,
+  collection: TaskCollection,
+  displayName: string,
+): Promise<TaskCollection> {
+  const authorization = authHeader(account.username, account.password)
+  const connection = connectionFromAccount(account)
+  const trimmedName = displayName.trim()
+  const response = await davRequest(connection, collection.url, {
+    method: 'PROPPATCH',
+    headers: {
+      Authorization: authorization,
+      'Content-Type': 'application/xml; charset=utf-8',
+    },
+    body: `<?xml version="1.0" encoding="utf-8" ?>
+      <d:propertyupdate xmlns:d="DAV:">
+        <d:set>
+          <d:prop>
+            <d:displayname>${escapeXml(trimmedName)}</d:displayname>
+          </d:prop>
+        </d:set>
+      </d:propertyupdate>`,
+  })
+
+  if (!response.ok && response.status !== 207) {
+    const message = await response.text()
+    throw new Error(`Task list rename failed (${response.status}): ${message}`)
+  }
+
+  return {
+    ...collection,
+    displayName: trimmedName,
   }
 }
 
@@ -792,10 +836,14 @@ function parseIcsDate(value?: string): string | undefined {
 function formatIcsDate(value: string): string {
   const date = new Date(value)
   if (Number.isNaN(date.getTime())) {
-    return value
+    return value.includes('-') ? value.replace(/-/g, '') : value
   }
 
   return date.toISOString().replace(/-/g, '').replace(/:/g, '').replace('.000', '')
+}
+
+function isDateOnlyValue(rawKey: string, value: string): boolean {
+  return rawKey.toUpperCase().includes('VALUE=DATE') || /^\d{8}$/.test(value)
 }
 
 function parseTaskFromIcs(
@@ -812,11 +860,22 @@ function parseTaskFromIcs(
       return
     }
 
-    const key = line.slice(0, index).split(';')[0].toUpperCase()
+    const rawKey = line.slice(0, index)
+    const key = rawKey.split(';')[0].toUpperCase()
     const value = line.slice(index + 1)
     const entries = props.get(key) ?? []
     entries.push(value)
     props.set(key, entries)
+    if (key === 'DTSTART') {
+      const markers = props.get('X-TASKMANAGER-DTSTART-ALLDAY') ?? []
+      markers.push(isDateOnlyValue(rawKey, value) ? '1' : '0')
+      props.set('X-TASKMANAGER-DTSTART-ALLDAY', markers)
+    }
+    if (key === 'DUE') {
+      const markers = props.get('X-TASKMANAGER-DUE-ALLDAY') ?? []
+      markers.push(isDateOnlyValue(rawKey, value) ? '1' : '0')
+      props.set('X-TASKMANAGER-DUE-ALLDAY', markers)
+    }
   })
 
   const uid = props.get('UID')?.[0]
@@ -834,7 +893,9 @@ function parseTaskFromIcs(
     status: (props.get('STATUS')?.[0]?.toLowerCase() ?? 'needs-action') as TaskItem['status'],
     priority: appPriorityFromRfcPriority(Number.parseInt(props.get('PRIORITY')?.[0] ?? '0', 10) || 0),
     startDate: parseIcsDate(props.get('DTSTART')?.[0]),
+    startDateIsAllDay: props.get('X-TASKMANAGER-DTSTART-ALLDAY')?.[0] === '1',
     dueDate: parseIcsDate(props.get('DUE')?.[0]),
+    dueDateIsAllDay: props.get('X-TASKMANAGER-DUE-ALLDAY')?.[0] === '1',
     completedAt: parseIcsDate(props.get('COMPLETED')?.[0]),
     createdAt: parseIcsDate(props.get('CREATED')?.[0]) ?? new Date().toISOString(),
     updatedAt: parseIcsDate(props.get('LAST-MODIFIED')?.[0]) ?? new Date().toISOString(),
@@ -1201,10 +1262,18 @@ function taskToIcs(task: TaskItem): string {
     lines.push(`CATEGORIES:${categoryNames}`)
   }
   if (task.startDate) {
-    lines.push(`DTSTART:${formatIcsDate(task.startDate)}`)
+    lines.push(
+      task.startDateIsAllDay
+        ? `DTSTART;VALUE=DATE:${formatIcsDate(task.startDate)}`
+        : `DTSTART:${formatIcsDate(task.startDate)}`,
+    )
   }
   if (task.dueDate) {
-    lines.push(`DUE:${formatIcsDate(task.dueDate)}`)
+    lines.push(
+      task.dueDateIsAllDay
+        ? `DUE;VALUE=DATE:${formatIcsDate(task.dueDate)}`
+        : `DUE:${formatIcsDate(task.dueDate)}`,
+    )
   }
   if (task.completedAt) {
     lines.push(`COMPLETED:${formatIcsDate(task.completedAt)}`)

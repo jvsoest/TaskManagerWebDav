@@ -34,6 +34,7 @@ export interface TaskCollection {
   url: string
   displayName: string
   description?: string
+  color?: string
   kind: CollectionKind
   ctag?: string
   syncToken?: string
@@ -72,7 +73,9 @@ export interface TaskItem {
   status: TaskStatus
   priority: number
   startDate?: string
+  startDateIsAllDay?: boolean
   dueDate?: string
+  dueDateIsAllDay?: boolean
   completedAt?: string
   createdAt: string
   updatedAt: string

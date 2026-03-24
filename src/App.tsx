@@ -22,6 +22,7 @@ import {
   deleteSmartListRemote,
   deleteTaskRemote,
   discoverAccount,
+  renameTaskCollection,
   saveMetadataRemote,
   syncAccount,
   upsertSmartListRemote,
@@ -140,6 +141,8 @@ function createDraft(collectionId?: string, accountId?: string): TaskDraft {
     notes: '',
     status: 'needs-action',
     priority: 0,
+    startDateIsAllDay: true,
+    dueDateIsAllDay: true,
     tagIds: [],
   }
 }
@@ -171,6 +174,29 @@ function normalizeDateInput(value?: string): string {
   }
 
   return new Date(date.getTime() - date.getTimezoneOffset() * 60_000).toISOString().slice(0, 16)
+}
+
+function normalizeDateOnlyInput(value?: string): string {
+  if (!value) {
+    return ''
+  }
+  if (/^\d{4}-\d{2}-\d{2}$/.test(value)) {
+    return value
+  }
+
+  const date = new Date(value)
+  if (Number.isNaN(date.getTime())) {
+    return value.slice(0, 10)
+  }
+
+  return new Date(date.getTime() - date.getTimezoneOffset() * 60_000).toISOString().slice(0, 10)
+}
+
+function collectionColorStyle(color?: string): React.CSSProperties | undefined {
+  if (!color) {
+    return undefined
+  }
+  return { '--collection-color': color } as React.CSSProperties
 }
 
 function displayDate(value?: string): string {
@@ -210,7 +236,9 @@ function sameTaskDraft(left: TaskDraft, right: TaskDraft): boolean {
     left.status === right.status &&
     left.priority === right.priority &&
     left.startDate === right.startDate &&
+    left.startDateIsAllDay === right.startDateIsAllDay &&
     left.dueDate === right.dueDate &&
+    left.dueDateIsAllDay === right.dueDateIsAllDay &&
     left.completedAt === right.completedAt &&
     left.url === right.url &&
     left.etag === right.etag &&
@@ -306,7 +334,7 @@ function App() {
   const [hydrated, setHydrated] = useState(false)
   const [activeAccountId, setActiveAccountId] = useState<string>()
   const [activeView, setActiveView] = useState<ActiveView>()
-  const [collectionViewScope, setCollectionViewScope] = useState<CollectionViewScope>('self-and-descendants')
+  const [collectionViewScope, setCollectionViewScope] = useState<CollectionViewScope>('self')
   const [selectedTaskId, setSelectedTaskId] = useState<string>()
   const [taskDraft, setTaskDraft] = useState<TaskDraft>(createDraft())
   const [connectionForm, setConnectionForm] = useState<AccountConnectionInput>(emptyConnection)
@@ -316,6 +344,7 @@ function App() {
   const [smartDraftDefinition, setSmartDraftDefinition] = useState('')
   const [smartDraftOrdering, setSmartDraftOrdering] = useState<TaskOrdering>(defaultSmartListOrdering())
   const [searchText, setSearchText] = useState('')
+  const [selectedViewTags, setSelectedViewTags] = useState<string[]>([])
   const [quickAddTitle, setQuickAddTitle] = useState('')
   const [busy, setBusy] = useState(false)
   const [message, setMessage] = useState('Connect a CalDAV account to start syncing tasks.')
@@ -331,6 +360,8 @@ function App() {
   const [settingsDropIndex, setSettingsDropIndex] = useState<number>()
   const [workspaceMode, setWorkspaceMode] = useState<WorkspaceMode>('tasks')
   const [settingsSection, setSettingsSection] = useState<SettingsSection>('accounts')
+  const [renamingCollectionId, setRenamingCollectionId] = useState<string>()
+  const [renameCollectionValue, setRenameCollectionValue] = useState('')
   const deliveredRef = useRef<Set<string>>(new Set())
   const taskRowsRef = useRef<Map<string, HTMLDivElement>>(new Map())
   const settingsRowsRef = useRef<Map<string, HTMLDivElement>>(new Map())
@@ -411,6 +442,11 @@ function App() {
     () => Array.from(new Set(activeTasks.flatMap((task) => task.tagIds))).sort(),
     [activeTasks],
   )
+  const activeViewKey = activeView?.kind === 'collection'
+    ? `collection:${activeView.collectionId}`
+    : activeView?.kind === 'smart'
+      ? `smart:${activeView.smartListId}`
+      : undefined
   const collectionTreeNodes = useMemo(
     () =>
       orderedTaskCollections.map((collection) => ({
@@ -443,7 +479,7 @@ function App() {
 
     if (orderedTaskCollections[0]) {
       setActiveView({ kind: 'collection', collectionId: orderedTaskCollections[0].id })
-      setCollectionViewScope('self-and-descendants')
+      setCollectionViewScope('self')
       return
     }
 
@@ -451,6 +487,10 @@ function App() {
       setActiveView({ kind: 'smart', smartListId: orderedSmartLists[0].id })
     }
   }, [activeAccountId, activeView, orderedSmartLists, orderedTaskCollections])
+
+  useEffect(() => {
+    setSelectedViewTags([])
+  }, [activeAccountId, activeViewKey])
 
   useEffect(() => {
     const selectedTask = snapshot.tasks.find(
@@ -468,7 +508,9 @@ function App() {
         status: selectedTask.status,
         priority: selectedTask.priority,
         startDate: selectedTask.startDate,
+        startDateIsAllDay: selectedTask.startDateIsAllDay ?? true,
         dueDate: selectedTask.dueDate,
+        dueDateIsAllDay: selectedTask.dueDateIsAllDay ?? true,
         completedAt: selectedTask.completedAt,
         tagIds: selectedTask.tagIds,
         url: selectedTask.url,
@@ -525,7 +567,7 @@ function App() {
   )
   const canManualReorderTasks = activeView?.kind === 'collection' && currentOrdering.mode === 'manual'
 
-  const visibleTasks = useMemo(() => {
+  const scopedVisibleTasks = useMemo(() => {
     let tasks = activeTasks
 
     if (activeView?.kind === 'collection') {
@@ -560,6 +602,19 @@ function App() {
 
     return sortTasks(tasks, currentOrdering, manualTaskIds)
   }, [activeSmartList, activeTasks, activeView, collectionViewScope, currentOrdering, deferredSearch, metadataDoc, taskCollections])
+  const visibleFilterTags = useMemo(
+    () => Array.from(new Set(scopedVisibleTasks.flatMap((task) => task.tagIds))).sort(),
+    [scopedVisibleTasks],
+  )
+  const visibleTasks = useMemo(() => {
+    if (selectedViewTags.length === 0) {
+      return scopedVisibleTasks
+    }
+
+    return scopedVisibleTasks.filter((task) =>
+      selectedViewTags.every((tag) => task.tagIds.includes(tag)),
+    )
+  }, [scopedVisibleTasks, selectedViewTags])
   const openVisibleTasks = useMemo(
     () => visibleTasks.filter((task) => task.status !== 'completed'),
     [visibleTasks],
@@ -1043,7 +1098,9 @@ function App() {
       status: taskDraft.status,
       priority: taskDraft.priority,
       startDate: taskDraft.startDate,
+      startDateIsAllDay: taskDraft.startDateIsAllDay,
       dueDate: taskDraft.dueDate,
+      dueDateIsAllDay: taskDraft.dueDateIsAllDay,
       completedAt: taskDraft.status === 'completed' ? taskDraft.completedAt ?? now : undefined,
       createdAt: snapshot.tasks.find((task) => task.id === taskDraft.id)?.createdAt ?? now,
       updatedAt: now,
@@ -1602,6 +1659,37 @@ function App() {
     }
   }
 
+  async function handleRenameTaskList(collectionId: string) {
+    if (!activeAccount || !renameCollectionValue.trim()) {
+      return
+    }
+
+    const collection = taskCollections.find((entry) => entry.id === collectionId)
+    if (!collection) {
+      return
+    }
+
+    setBusy(true)
+    setMessage(`Renaming ${collection.displayName}...`)
+
+    try {
+      const renamedCollection = await renameTaskCollection(activeAccount, collection, renameCollectionValue)
+      replaceSnapshotWith((current) => ({
+        ...current,
+        collections: current.collections.map((entry) => (entry.id === collectionId ? renamedCollection : entry)),
+      }))
+      setRenamingCollectionId(undefined)
+      setRenameCollectionValue('')
+      setMessage('Task list renamed.')
+    } catch (error) {
+      const failure = error instanceof Error ? error.message : 'Task list rename failed.'
+      recordSyncIssue('Task list rename', failure, activeAccount.id)
+      setMessage(failure)
+    } finally {
+      setBusy(false)
+    }
+  }
+
   async function handleSaveSmartList() {
     if (!activeAccount || !smartCollection || !metadataDoc || !smartDraftName.trim()) {
       return
@@ -1843,29 +1931,48 @@ function App() {
         parentId: metadataDoc?.collectionParents[entry.id],
       })),
     )
-    const taskCount = activeTasks.filter((task) => descendantIds.has(task.collectionId)).length
+    const selfTaskCount = activeTasks.filter((task) => task.collectionId === collection.id).length
+    const descendantTaskCount = activeTasks.filter((task) => descendantIds.has(task.collectionId)).length
+    const taskCount = hasChildren && isCollapsed ? descendantTaskCount : selfTaskCount
 
     return (
       <div key={collection.id} className="sidebar-folder">
         <div className={`sidebar-folder-toggle depth-${Math.min(depth, 3)} ${hasChildren ? 'has-children' : ''}`}>
-          {hasChildren ? (
-            <button className="ghost-icon small" onClick={() => toggleCollectionCollapsed(collection.id)}>
-              {isCollapsed ? '>' : 'v'}
-            </button>
-          ) : (
-            <span className="sidebar-tree-spacer" />
-          )}
           <button
             className={`sidebar-link nested ${
               activeView?.kind === 'collection' && activeView.collectionId === collection.id ? 'active' : ''
             }`}
+            style={collectionColorStyle(collection.color)}
             onClick={() => {
               setActiveView({ kind: 'collection', collectionId: collection.id })
-              setCollectionViewScope('self-and-descendants')
+              setCollectionViewScope('self')
               setIsSidebarOpen(false)
             }}
           >
-            <span>{collection.displayName}</span>
+            <span className="sidebar-link-main">
+              {hasChildren ? (
+                <span
+                  className={`collection-color-dot collapsible ${isCollapsed ? 'collapsed' : 'expanded'}`}
+                  onClick={(event) => {
+                    event.stopPropagation()
+                    toggleCollectionCollapsed(collection.id)
+                  }}
+                  role="button"
+                  aria-label={isCollapsed ? 'Expand sublists' : 'Collapse sublists'}
+                  tabIndex={0}
+                  onKeyDown={(event) => {
+                    if (event.key === 'Enter' || event.key === ' ') {
+                      event.preventDefault()
+                      event.stopPropagation()
+                      toggleCollectionCollapsed(collection.id)
+                    }
+                  }}
+                />
+              ) : (
+                <span className="collection-color-dot" />
+              )}
+              <span>{collection.displayName}</span>
+            </span>
             <strong>{taskCount}</strong>
           </button>
         </div>
@@ -1896,7 +2003,7 @@ function App() {
             settingsDragSession?.kind === 'collection' && settingsDragSession.itemId === collection.id ? 'drag-source-hidden' : ''
           }`}
         >
-          <div className="settings-row-title">
+          <div className="settings-row-title" style={collectionColorStyle(collection.color)}>
             <span
               className="task-drag-handle settings-drag-handle"
               onPointerDown={(event) =>
@@ -1905,7 +2012,17 @@ function App() {
             >
               ::
             </span>
-            <span>{collection.displayName}</span>
+            <span className="collection-color-dot" />
+            {renamingCollectionId === collection.id ? (
+              <input
+                value={renameCollectionValue}
+                onChange={(event) => setRenameCollectionValue(event.target.value)}
+                className="rename-list-input"
+                placeholder="List name"
+              />
+            ) : (
+              <span>{collection.displayName}</span>
+            )}
           </div>
           <div className="assign-actions">
             <select
@@ -1977,6 +2094,32 @@ function App() {
                   ))}
                 </select>
               </>
+            )}
+            {renamingCollectionId === collection.id ? (
+              <>
+                <button className="ghost-button" onClick={() => void handleRenameTaskList(collection.id)} disabled={busy}>
+                  Save
+                </button>
+                <button
+                  className="ghost-button"
+                  onClick={() => {
+                    setRenamingCollectionId(undefined)
+                    setRenameCollectionValue('')
+                  }}
+                >
+                  Cancel
+                </button>
+              </>
+            ) : (
+              <button
+                className="ghost-button"
+                onClick={() => {
+                  setRenamingCollectionId(collection.id)
+                  setRenameCollectionValue(collection.displayName)
+                }}
+              >
+                Rename
+              </button>
             )}
             <button className="ghost-button danger" onClick={() => void handleDeleteTaskList(collection.id)}>
               Delete
@@ -2395,10 +2538,8 @@ function App() {
                                 >
                                   ::
                                 </span>
-                                <div>
-                                  <strong>{smartList.name}</strong>
-                                  <span>{smartList.definition || 'No definition'}</span>
-                                </div>
+                                <strong>{smartList.name}</strong>
+                                <span className="inline-definition">{smartList.definition || 'No definition'}</span>
                               </div>
                               <div className="row-control-group">
                                 <button className="ghost-button" onClick={() => editSmartList(smartList)}>
@@ -2503,6 +2644,24 @@ function App() {
               )}
             </div>
 
+            {visibleFilterTags.length > 0 && (
+              <div className="view-tag-chips">
+                {visibleFilterTags.map((tag) => (
+                  <button
+                    key={tag}
+                    className={`tag-chip ${selectedViewTags.includes(tag) ? 'active' : ''}`}
+                    onClick={() =>
+                      setSelectedViewTags((current) =>
+                        current.includes(tag) ? current.filter((entry) => entry !== tag) : [...current, tag],
+                      )
+                    }
+                  >
+                    {tag}
+                  </button>
+                ))}
+              </div>
+            )}
+
             <div className="quick-add-row">
               <button className="quick-add-trigger" onClick={() => handleQuickAdd()} disabled={!activeAccount}>
                 +
@@ -2588,7 +2747,8 @@ function App() {
                         <div className="task-side">
                           {task.priority > 0 && <span className={`priority-badge priority-${task.priority}`}>P{task.priority}</span>}
                           <span className="task-date">{displayDate(task.dueDate ?? task.startDate)}</span>
-                          <span className="task-list-name">
+                          <span className="task-list-name" style={collectionColorStyle(taskCollections.find((collection) => collection.id === task.collectionId)?.color)}>
+                            <span className="collection-color-dot subtle" />
                             {taskCollections.find((collection) => collection.id === task.collectionId)?.displayName}
                           </span>
                         </div>
@@ -2626,7 +2786,8 @@ function App() {
                     <div className="task-side">
                       {task.priority > 0 && <span className={`priority-badge priority-${task.priority}`}>P{task.priority}</span>}
                       <span className="task-date">{displayDate(task.dueDate ?? task.startDate)}</span>
-                      <span className="task-list-name">
+                      <span className="task-list-name" style={collectionColorStyle(taskCollections.find((collection) => collection.id === task.collectionId)?.color)}>
+                        <span className="collection-color-dot subtle" />
                         {taskCollections.find((collection) => collection.id === task.collectionId)?.displayName}
                       </span>
                     </div>
@@ -2655,7 +2816,8 @@ function App() {
                   <div className="task-side">
                     {draggedTask.priority > 0 && <span className={`priority-badge priority-${draggedTask.priority}`}>P{draggedTask.priority}</span>}
                     <span className="task-date">{displayDate(draggedTask.dueDate ?? draggedTask.startDate)}</span>
-                    <span className="task-list-name">
+                    <span className="task-list-name" style={collectionColorStyle(taskCollections.find((collection) => collection.id === draggedTask.collectionId)?.color)}>
+                      <span className="collection-color-dot subtle" />
                       {taskCollections.find((collection) => collection.id === draggedTask.collectionId)?.displayName}
                     </span>
                   </div>
@@ -2751,23 +2913,65 @@ function App() {
                 <div className="editor-chipbar">
                   <div className="editor-chipfield">
                     <span>Start</span>
-                    <input
-                      type="datetime-local"
-                      value={normalizeDateInput(taskDraft.startDate)}
-                      onChange={(event) =>
-                        setTaskDraft((current) => ({ ...current, startDate: event.target.value || undefined }))
-                      }
-                    />
+                    <div className="date-field-row">
+                      <input
+                        type={taskDraft.startDateIsAllDay ? 'date' : 'datetime-local'}
+                        value={(taskDraft.startDateIsAllDay ? normalizeDateOnlyInput : normalizeDateInput)(taskDraft.startDate)}
+                        onChange={(event) =>
+                          setTaskDraft((current) => ({ ...current, startDate: event.target.value || undefined }))
+                        }
+                      />
+                      <label className="checkbox-row compact subtle-all-day">
+                        <input
+                          type="checkbox"
+                          checked={taskDraft.startDateIsAllDay ?? true}
+                          onChange={(event) =>
+                            setTaskDraft((current) => ({
+                              ...current,
+                              startDateIsAllDay: event.target.checked,
+                              startDate:
+                                current.startDate && event.target.checked
+                                  ? normalizeDateOnlyInput(current.startDate)
+                                  : current.startDate && !event.target.checked
+                                    ? `${normalizeDateOnlyInput(current.startDate)}T09:00`
+                                  : current.startDate,
+                            }))
+                          }
+                        />
+                        All-day
+                      </label>
+                    </div>
                   </div>
                   <div className="editor-chipfield">
                     <span>Due</span>
-                    <input
-                      type="datetime-local"
-                      value={normalizeDateInput(taskDraft.dueDate)}
-                      onChange={(event) =>
-                        setTaskDraft((current) => ({ ...current, dueDate: event.target.value || undefined }))
-                      }
-                    />
+                    <div className="date-field-row">
+                      <input
+                        type={taskDraft.dueDateIsAllDay ? 'date' : 'datetime-local'}
+                        value={(taskDraft.dueDateIsAllDay ? normalizeDateOnlyInput : normalizeDateInput)(taskDraft.dueDate)}
+                        onChange={(event) =>
+                          setTaskDraft((current) => ({ ...current, dueDate: event.target.value || undefined }))
+                        }
+                      />
+                      <label className="checkbox-row compact subtle-all-day">
+                        <input
+                          type="checkbox"
+                          checked={taskDraft.dueDateIsAllDay ?? true}
+                          onChange={(event) =>
+                            setTaskDraft((current) => ({
+                              ...current,
+                              dueDateIsAllDay: event.target.checked,
+                              dueDate:
+                                current.dueDate && event.target.checked
+                                  ? normalizeDateOnlyInput(current.dueDate)
+                                  : current.dueDate && !event.target.checked
+                                    ? `${normalizeDateOnlyInput(current.dueDate)}T09:00`
+                                  : current.dueDate,
+                            }))
+                          }
+                        />
+                        All-day
+                      </label>
+                    </div>
                   </div>
                 </div>
               </div>
@@ -2802,10 +3006,8 @@ function App() {
             <div className="simple-row settings-preview-row">
               <div className="settings-row-title">
                 <span className="task-drag-handle settings-drag-handle">::</span>
-                <div>
-                  <strong>{draggedSettingsCollection?.displayName ?? draggedSettingsSmartList?.name}</strong>
-                  {draggedSettingsSmartList && <span>{draggedSettingsSmartList.definition || 'No definition'}</span>}
-                </div>
+                <strong>{draggedSettingsCollection?.displayName ?? draggedSettingsSmartList?.name}</strong>
+                {draggedSettingsSmartList && <span className="inline-definition">{draggedSettingsSmartList.definition || 'No definition'}</span>}
               </div>
             </div>
           </div>

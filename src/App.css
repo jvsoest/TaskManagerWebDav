@@ -214,6 +214,51 @@ button {
   transition: background-color 120ms ease, color 120ms ease;
 }
 
+.sidebar-link-main {
+  min-width: 0;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  justify-content: flex-start;
+}
+
+.collection-color-dot {
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--collection-color, #d7d7d7) 45%, white);
+  box-shadow: inset 0 0 0 1px rgba(15, 23, 42, 0.06);
+  flex: 0 0 auto;
+}
+
+.collection-color-dot.collapsible {
+  position: relative;
+  cursor: pointer;
+}
+
+.collection-color-dot.collapsible::after {
+  content: '';
+  position: absolute;
+  inset: -4px;
+}
+
+.collection-color-dot.collapsible.collapsed {
+  box-shadow:
+    inset 0 0 0 1px rgba(15, 23, 42, 0.06),
+    0 0 0 2px rgba(15, 23, 42, 0.08);
+}
+
+.collection-color-dot.collapsible.expanded {
+  background: transparent;
+  box-shadow: inset 0 0 0 2px color-mix(in srgb, var(--collection-color, #d7d7d7) 55%, white);
+}
+
+.collection-color-dot.subtle {
+  width: 7px;
+  height: 7px;
+}
+
 .sidebar-link:hover,
 .account-switcher:hover {
   background: rgba(255, 255, 255, 0.78);
@@ -249,6 +294,10 @@ button {
   line-height: 1.2;
 }
 
+.sidebar-link.nested span:first-of-type {
+  min-width: 0;
+}
+
 .nested {
   padding-left: 0;
 }
@@ -270,24 +319,18 @@ button {
 .sidebar-folder-toggle {
   width: 100%;
   display: flex;
-  align-items: center;
-  gap: 2px;
+  align-items: stretch;
   padding: 0;
   color: var(--muted);
   text-align: left;
 }
 
 .sidebar-folder-toggle .sidebar-link {
-  padding-left: 10px;
+  padding-left: 8px;
 }
 
 .sidebar-folder-toggle.has-children .sidebar-link {
-  padding-left: 4px;
-}
-
-.sidebar-tree-spacer {
-  width: 0;
-  flex: 0 0 0;
+  padding-left: 8px;
 }
 
 .depth-0 {
@@ -295,15 +338,15 @@ button {
 }
 
 .depth-1 {
-  padding-left: 12px;
+  padding-left: 24px;
 }
 
 .depth-2 {
-  padding-left: 18px;
+  padding-left: 36px;
 }
 
 .depth-3 {
-  padding-left: 24px;
+  padding-left: 48px;
 }
 
 .sidebar-smart-row {
@@ -406,6 +449,28 @@ button {
   align-items: center;
   gap: 16px;
   margin-bottom: 20px;
+}
+
+.view-tag-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin: -6px 0 16px;
+}
+
+.tag-chip {
+  padding: 6px 10px;
+  border-radius: 999px;
+  border: 1px solid var(--line);
+  background: var(--surface);
+  color: var(--muted);
+  font-size: 0.88rem;
+}
+
+.tag-chip.active {
+  color: var(--accent);
+  border-color: color-mix(in srgb, var(--accent) 35%, var(--line));
+  background: #fff4ef;
 }
 
 .list-header p {
@@ -547,6 +612,12 @@ button {
   display: grid;
   gap: 4px;
   text-align: left;
+}
+
+.task-list-name {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
 }
 
 .task-title {
@@ -892,6 +963,20 @@ button {
   min-width: 0;
 }
 
+.settings-row-title strong,
+.settings-row-title span,
+.inline-definition {
+  min-width: 0;
+}
+
+.inline-definition {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  color: var(--muted);
+  font-size: 0.88rem;
+}
+
 .settings-drag-handle {
   flex: 0 0 auto;
 }
@@ -928,6 +1013,19 @@ button {
   padding: 8px 10px;
 }
 
+.rename-list-input {
+  min-width: 0;
+  width: 100%;
+  border: 0;
+  background: transparent;
+  font: inherit;
+  color: inherit;
+}
+
+.rename-list-input:focus {
+  outline: none;
+}
+
 .create-list-row .settings-row-title input {
   min-width: 0;
   width: 100%;
@@ -953,6 +1051,29 @@ button {
   box-shadow: 0 18px 36px rgba(15, 23, 42, 0.18);
   transform: rotate(-1deg);
   background: #fffdfc;
+}
+
+.checkbox-row.compact {
+  gap: 6px;
+  font-size: 0.82rem;
+}
+
+.date-field-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 8px;
+}
+
+.subtle-all-day {
+  color: var(--muted);
+  font-size: 0.74rem;
+  white-space: nowrap;
+}
+
+.subtle-all-day input {
+  width: 13px;
+  height: 13px;
 }
 
 .mobile-only {
