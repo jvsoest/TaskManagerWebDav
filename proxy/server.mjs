@@ -14,7 +14,7 @@ const UPSTREAM_ALLOWLIST = (process.env.UPSTREAM_ALLOWLIST ?? '')
   .split(',')
   .map((value) => value.trim().toLowerCase())
   .filter(Boolean)
-const ALLOWED_METHODS = new Set(['GET', 'HEAD', 'OPTIONS', 'PROPFIND', 'REPORT', 'PUT', 'DELETE', 'MKCALENDAR'])
+const ALLOWED_METHODS = new Set(['GET', 'HEAD', 'OPTIONS', 'PROPFIND', 'PROPPATCH', 'REPORT', 'PUT', 'DELETE', 'MKCALENDAR'])
 const HOP_BY_HOP_HEADERS = new Set([
   'connection',
   'content-length',

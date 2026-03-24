@@ -741,6 +741,41 @@ export async function renameTaskCollection(
   }
 }
 
+export async function updateTaskCollectionColor(
+  account: Account,
+  collection: TaskCollection,
+  color: string,
+): Promise<TaskCollection> {
+  const authorization = authHeader(account.username, account.password)
+  const connection = connectionFromAccount(account)
+  const normalizedColor = color.trim().toUpperCase()
+  const response = await davRequest(connection, collection.url, {
+    method: 'PROPPATCH',
+    headers: {
+      Authorization: authorization,
+      'Content-Type': 'application/xml; charset=utf-8',
+    },
+    body: `<?xml version="1.0" encoding="utf-8" ?>
+      <d:propertyupdate xmlns:d="DAV:" xmlns:a="http://apple.com/ns/ical/">
+        <d:set>
+          <d:prop>
+            <a:calendar-color>${escapeXml(normalizedColor)}</a:calendar-color>
+          </d:prop>
+        </d:set>
+      </d:propertyupdate>`,
+  })
+
+  if (!response.ok && response.status !== 207) {
+    const message = await response.text()
+    throw new Error(`Task list color update failed (${response.status}): ${message}`)
+  }
+
+  return {
+    ...collection,
+    color: normalizedColor,
+  }
+}
+
 export async function deleteTaskCollection(account: Account, collection: TaskCollection): Promise<void> {
   const connection = connectionFromAccount(account)
   const authorization = authHeader(account.username, account.password)
@@ -1283,12 +1318,14 @@ function taskToIcs(task: TaskItem): string {
   return lines.join('\r\n')
 }
 
-export async function syncAccount(account: Account, collections: TaskCollection[]): Promise<SyncResult> {
+export async function syncAccount(account: Account): Promise<SyncResult> {
+  const discovery = await discoverAccount(connectionInputFromAccount(account), account.id)
+  const refreshedCollections = discovery.collections
   const authorization = authHeader(account.username, account.password)
   const connection = connectionFromAccount(account)
-  const metadataCollection = collections.find((collection) => collection.kind === 'metadata')
-  const smartCollection = collections.find((collection) => collection.kind === 'smart')
-  const taskCollections = collections.filter((collection) => collection.kind === 'task')
+  const metadataCollection = refreshedCollections.find((collection) => collection.kind === 'metadata')
+  const smartCollection = refreshedCollections.find((collection) => collection.kind === 'smart')
+  const taskCollections = refreshedCollections.filter((collection) => collection.kind === 'task')
   if (!metadataCollection || !smartCollection) {
     throw new Error('Required hidden TaskManager collections are missing.')
   }
@@ -1365,7 +1402,7 @@ export async function syncAccount(account: Account, collections: TaskCollection[
 
   return {
     tasks: taskLists.flat(),
-    collections,
+    collections: refreshedCollections,
     metadataDoc,
     smartLists,
   }

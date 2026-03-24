@@ -1,4 +1,6 @@
 import { startTransition, useCallback, useDeferredValue, useEffect, useMemo, useRef, useState } from 'react'
+import ReactMarkdown from 'react-markdown'
+import remarkGfm from 'remark-gfm'
 import './App.css'
 import {
   createDefaultMetadata,
@@ -25,6 +27,7 @@ import {
   renameTaskCollection,
   saveMetadataRemote,
   syncAccount,
+  updateTaskCollectionColor,
   upsertSmartListRemote,
   upsertTaskRemote,
 } from './lib/caldav'
@@ -50,6 +53,7 @@ type ActiveView =
 type WorkspaceMode = 'tasks' | 'settings'
 type SettingsSection = 'accounts' | 'structure'
 type CollectionViewScope = 'self' | 'self-and-descendants'
+type DescriptionMode = 'display' | 'edit'
 
 type TaskDraft = Omit<TaskItem, 'id' | 'uid' | 'createdAt' | 'updatedAt' | 'syncState'> & {
   id?: string
@@ -199,6 +203,19 @@ function collectionColorStyle(color?: string): React.CSSProperties | undefined {
   return { '--collection-color': color } as React.CSSProperties
 }
 
+function normalizeColorForInput(color?: string): string {
+  if (!color) {
+    return '#D7D7D7'
+  }
+
+  const match = /^#([0-9a-f]{6}|[0-9a-f]{8})$/i.exec(color.trim())
+  if (!match) {
+    return '#D7D7D7'
+  }
+
+  return `#${match[1].slice(0, 6)}`
+}
+
 function displayDate(value?: string): string {
   if (!value) {
     return 'No date'
@@ -223,6 +240,10 @@ function syncLabel(value?: string): string {
   }
 
   return `Synced ${new Date(value).toLocaleString()}`
+}
+
+function defaultDescriptionMode(notes?: string): DescriptionMode {
+  return notes?.trim() ? 'display' : 'edit'
 }
 
 function sameTaskDraft(left: TaskDraft, right: TaskDraft): boolean {
@@ -362,6 +383,8 @@ function App() {
   const [settingsSection, setSettingsSection] = useState<SettingsSection>('accounts')
   const [renamingCollectionId, setRenamingCollectionId] = useState<string>()
   const [renameCollectionValue, setRenameCollectionValue] = useState('')
+  const [colorPickerCollectionId, setColorPickerCollectionId] = useState<string>()
+  const [descriptionMode, setDescriptionMode] = useState<DescriptionMode>('edit')
   const deliveredRef = useRef<Set<string>>(new Set())
   const taskRowsRef = useRef<Map<string, HTMLDivElement>>(new Map())
   const settingsRowsRef = useRef<Map<string, HTMLDivElement>>(new Map())
@@ -518,6 +541,7 @@ function App() {
       }
 
       setTaskDraft((current) => (sameTaskDraft(current, nextDraft) ? current : nextDraft))
+      setDescriptionMode(defaultDescriptionMode(selectedTask.notes))
       return
     }
 
@@ -527,6 +551,7 @@ function App() {
 
     const nextDraft = createDraft(defaultCollectionId, activeAccountId)
     setTaskDraft((current) => (sameTaskDraft(current, nextDraft) ? current : nextDraft))
+    setDescriptionMode(defaultDescriptionMode(nextDraft.notes))
   }, [activeAccountId, defaultCollectionId, isCreatingTask, selectedTaskId, snapshot.tasks])
 
   useEffect(() => {
@@ -714,12 +739,14 @@ function App() {
     setSelectedTaskId(undefined)
     setIsCreatingTask(false)
     setTaskDraft(createDraft(defaultCollectionId, activeAccountId))
+    setDescriptionMode('edit')
   }
 
   function beginNewTask(prefill = '') {
     setWorkspaceMode('tasks')
     setSelectedTaskId(undefined)
     setIsCreatingTask(true)
+    setDescriptionMode('edit')
     setTaskDraft({
       ...createDraft(defaultCollectionId, activeAccountId),
       title: prefill,
@@ -1014,7 +1041,7 @@ function App() {
       setActiveView(undefined)
       setConnectionForm(emptyConnection)
 
-      await handleSyncAccount(account, discovery.collections, true)
+      await handleSyncAccount(account, true)
     } catch (error) {
       const failure = error instanceof Error ? error.message : 'Failed to connect account.'
       recordSyncIssue('Account connection', failure, accountId)
@@ -1026,7 +1053,6 @@ function App() {
 
   async function handleSyncAccount(
     account = activeAccount,
-    collections = activeCollections,
     isFirstSync = false,
   ) {
     if (!account) {
@@ -1038,7 +1064,7 @@ function App() {
     updateAccount(account.id, { syncState: 'syncing', lastError: undefined })
 
     try {
-      const result = await syncAccount(account, collections)
+      const result = await syncAccount(account)
       const nextAccount: Account = {
         ...account,
         syncState: 'synced',
@@ -1690,6 +1716,36 @@ function App() {
     }
   }
 
+  async function handleUpdateTaskListColor(collectionId: string, color: string) {
+    if (!activeAccount) {
+      return
+    }
+
+    const collection = taskCollections.find((entry) => entry.id === collectionId)
+    if (!collection) {
+      return
+    }
+
+    setBusy(true)
+    setMessage(`Updating color for ${collection.displayName}...`)
+
+    try {
+      const updatedCollection = await updateTaskCollectionColor(activeAccount, collection, color)
+      replaceSnapshotWith((current) => ({
+        ...current,
+        collections: current.collections.map((entry) => (entry.id === collectionId ? updatedCollection : entry)),
+      }))
+      setColorPickerCollectionId(undefined)
+      setMessage('Task list color updated.')
+    } catch (error) {
+      const failure = error instanceof Error ? error.message : 'Task list color update failed.'
+      recordSyncIssue('Task list color update', failure, activeAccount.id)
+      setMessage(failure)
+    } finally {
+      setBusy(false)
+    }
+  }
+
   async function handleSaveSmartList() {
     if (!activeAccount || !smartCollection || !metadataDoc || !smartDraftName.trim()) {
       return
@@ -1846,7 +1902,10 @@ function App() {
       return
     }
 
-    const targetCollection = taskCollections[0]
+    const targetCollection =
+      activeView?.kind === 'collection'
+        ? taskCollections.find((collection) => collection.id === activeView.collectionId) ?? taskCollections[0]
+        : taskCollections[0]
     const now = new Date().toISOString()
     const nextTask: TaskItem = {
       id: newId(),
@@ -2012,7 +2071,14 @@ function App() {
             >
               ::
             </span>
-            <span className="collection-color-dot" />
+            <button
+              className="color-dot-button"
+              onClick={() =>
+                setColorPickerCollectionId((current) => (current === collection.id ? undefined : collection.id))
+              }
+            >
+              <span className="collection-color-dot" />
+            </button>
             {renamingCollectionId === collection.id ? (
               <input
                 value={renameCollectionValue}
@@ -2022,6 +2088,15 @@ function App() {
               />
             ) : (
               <span>{collection.displayName}</span>
+            )}
+            {colorPickerCollectionId === collection.id && (
+              <div className="color-picker-inline">
+                <input
+                  type="color"
+                  value={normalizeColorForInput(collection.color)}
+                  onChange={(event) => void handleUpdateTaskListColor(collection.id, event.target.value)}
+                />
+              </div>
             )}
           </div>
           <div className="assign-actions">
@@ -2742,7 +2817,15 @@ function App() {
                         </button>
                         <button className="task-main" onClick={(event) => event.preventDefault()}>
                           <span className="task-title">{task.title || 'Untitled task'}</span>
-                          <span className="task-subline">{task.notes || 'No description'}</span>
+                          {task.tagIds.length > 0 && (
+                            <span className="task-tag-row">
+                              {task.tagIds.map((tag) => (
+                                <span key={tag} className="task-inline-tag">
+                                  {tag}
+                                </span>
+                              ))}
+                            </span>
+                          )}
                         </button>
                         <div className="task-side">
                           {task.priority > 0 && <span className={`priority-badge priority-${task.priority}`}>P{task.priority}</span>}
@@ -2781,7 +2864,15 @@ function App() {
                     </button>
                     <button className="task-main" onClick={() => openTask(task.id)}>
                       <span className="task-title">{task.title || 'Untitled task'}</span>
-                      <span className="task-subline">{task.notes || 'No description'}</span>
+                      {task.tagIds.length > 0 && (
+                        <span className="task-tag-row">
+                          {task.tagIds.map((tag) => (
+                            <span key={tag} className="task-inline-tag">
+                              {tag}
+                            </span>
+                          ))}
+                        </span>
+                      )}
                     </button>
                     <div className="task-side">
                       {task.priority > 0 && <span className={`priority-badge priority-${task.priority}`}>P{task.priority}</span>}
@@ -2811,7 +2902,15 @@ function App() {
                   </button>
                   <div className="task-main">
                     <span className="task-title">{draggedTask.title || 'Untitled task'}</span>
-                    <span className="task-subline">{draggedTask.notes || 'No description'}</span>
+                    {draggedTask.tagIds.length > 0 && (
+                      <span className="task-tag-row">
+                        {draggedTask.tagIds.map((tag) => (
+                          <span key={tag} className="task-inline-tag">
+                            {tag}
+                          </span>
+                        ))}
+                      </span>
+                    )}
                   </div>
                   <div className="task-side">
                     {draggedTask.priority > 0 && <span className={`priority-badge priority-${draggedTask.priority}`}>P{draggedTask.priority}</span>}
@@ -2849,13 +2948,45 @@ function App() {
                 placeholder="Task name"
               />
 
-              <textarea
-                className="editor-notes"
-                rows={8}
-                value={taskDraft.notes}
-                onChange={(event) => setTaskDraft((current) => ({ ...current, notes: event.target.value }))}
-                placeholder="Description"
-              />
+              <section className="description-panel">
+                <div className="description-header">
+                  <div>
+                    <strong>Description</strong>
+                    <span>{descriptionMode === 'display' ? 'Markdown preview' : 'Markdown editor'}</span>
+                  </div>
+                  <button
+                    className="ghost-button"
+                    onClick={() =>
+                      setDescriptionMode((current) =>
+                        current === 'display' ? 'edit' : taskDraft.notes.trim() ? 'display' : 'edit',
+                      )
+                    }
+                  >
+                    {descriptionMode === 'display' ? 'Edit' : taskDraft.notes.trim() ? 'Done' : 'Preview'}
+                  </button>
+                </div>
+
+                {descriptionMode === 'display' ? (
+                  <div className="markdown-display" onClick={() => setDescriptionMode('edit')}>
+                    <ReactMarkdown
+                      remarkPlugins={[remarkGfm]}
+                      components={{
+                        a: (props) => <a {...props} target="_blank" rel="noreferrer" />,
+                      }}
+                    >
+                      {taskDraft.notes}
+                    </ReactMarkdown>
+                  </div>
+                ) : (
+                  <textarea
+                    className="editor-notes"
+                    rows={taskDraft.notes.trim() ? 7 : 5}
+                    value={taskDraft.notes}
+                    onChange={(event) => setTaskDraft((current) => ({ ...current, notes: event.target.value }))}
+                    placeholder="Write markdown notes, checklists, links, or code snippets"
+                  />
+                )}
+              </section>
 
               <div className="editor-meta-block">
                 <div className="editor-chipbar">

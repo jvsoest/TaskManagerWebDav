@@ -529,7 +529,7 @@ button {
   grid-template-columns: auto auto minmax(0, 1fr) auto;
   gap: 12px;
   align-items: center;
-  padding: 12px 16px;
+  padding: 10px 14px;
   background: var(--surface);
   border-radius: 10px;
   transition:
@@ -610,7 +610,7 @@ button {
 .task-main {
   min-width: 0;
   display: grid;
-  gap: 4px;
+  gap: 6px;
   text-align: left;
 }
 
@@ -624,16 +624,26 @@ button {
   font-weight: 500;
 }
 
-.task-subline {
-  font-size: 0.9rem;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
+.task-tag-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.task-inline-tag {
+  display: inline-flex;
+  align-items: center;
+  padding: 2px 8px;
+  border-radius: 999px;
+  background: #f3f4f6;
+  color: var(--muted);
+  font-size: 0.78rem;
+  line-height: 1.2;
 }
 
 .task-side {
   display: flex;
-  gap: 12px;
+  gap: 10px;
   align-items: center;
   flex-wrap: wrap;
   justify-content: flex-end;
@@ -660,21 +670,21 @@ button {
 
 .editor-header {
   align-items: center;
-  margin-bottom: 14px;
+  margin-bottom: 12px;
 }
 
 .editor-body {
-  max-width: 720px;
+  max-width: 680px;
   display: grid;
-  gap: 12px;
+  gap: 10px;
 }
 
 .editor-title {
-  padding: 0 0 10px;
+  padding: 0 0 8px;
   border: 0;
   border-bottom: 1px solid var(--line);
   border-radius: 0;
-  font-size: 1.45rem;
+  font-size: 1.32rem;
   line-height: 1.25;
   font-weight: 600;
   outline: none;
@@ -682,16 +692,18 @@ button {
 
 .editor-notes {
   padding: 12px 14px;
-  min-height: 120px;
+  min-height: 132px;
   resize: vertical;
   line-height: 1.45;
+  border: 0;
+  background: transparent;
 }
 
 .editor-meta-block,
 .editor-chipbar,
 .chip-field {
   display: grid;
-  gap: 8px;
+  gap: 6px;
 }
 
 .editor-chipbar {
@@ -744,11 +756,142 @@ button {
 
 .editor-chipfield input,
 .editor-chipfield select {
+  padding: 7px 10px;
+  border: 1px solid var(--line);
+  border-radius: 9px;
+  background: var(--surface-muted);
+  min-height: 36px;
+}
+
+.description-panel {
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  background: linear-gradient(180deg, #fffdfb 0%, #fff 100%);
+  overflow: hidden;
+}
+
+.description-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--line);
+  background: rgba(250, 250, 250, 0.9);
+}
+
+.description-header > div {
+  display: grid;
+  gap: 2px;
+}
+
+.description-header strong {
+  font-size: 0.88rem;
+}
+
+.description-header span {
+  color: var(--muted);
+  font-size: 0.76rem;
+}
+
+.description-panel .ghost-button {
+  padding: 7px 10px;
+  border-radius: 8px;
+}
+
+.markdown-display {
+  min-height: 88px;
+  padding: 14px 16px 16px;
+  line-height: 1.55;
+}
+
+.markdown-display:empty::before {
+  content: 'No description yet.';
+  color: var(--muted);
+}
+
+.markdown-display p,
+.markdown-display ul,
+.markdown-display ol,
+.markdown-display blockquote,
+.markdown-display pre,
+.markdown-display table,
+.markdown-display h1,
+.markdown-display h2,
+.markdown-display h3,
+.markdown-display h4 {
+  margin: 0 0 10px;
+}
+
+.markdown-display p:last-child,
+.markdown-display ul:last-child,
+.markdown-display ol:last-child,
+.markdown-display blockquote:last-child,
+.markdown-display pre:last-child,
+.markdown-display table:last-child {
+  margin-bottom: 0;
+}
+
+.markdown-display ul,
+.markdown-display ol {
+  padding-left: 20px;
+}
+
+.markdown-display blockquote {
+  padding-left: 12px;
+  border-left: 3px solid #eadfd5;
+  color: #4b5563;
+}
+
+.markdown-display code {
+  padding: 0.12rem 0.34rem;
+  border-radius: 6px;
+  background: #f3f4f6;
+  font-size: 0.88em;
+}
+
+.markdown-display pre {
+  padding: 12px;
+  border-radius: 10px;
+  background: #f6f7f8;
+  overflow: auto;
+}
+
+.markdown-display pre code {
+  padding: 0;
+  background: transparent;
+}
+
+.markdown-display a {
+  color: var(--accent);
+  text-decoration: none;
+}
+
+.markdown-display a:hover {
+  text-decoration: underline;
+}
+
+.markdown-display table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.92rem;
+}
+
+.markdown-display th,
+.markdown-display td {
   padding: 8px 10px;
   border: 1px solid var(--line);
-  border-radius: 10px;
-  background: var(--surface-muted);
-  min-height: 38px;
+  text-align: left;
+  vertical-align: top;
+}
+
+.markdown-display th {
+  background: #f8f8f8;
+  font-weight: 600;
+}
+
+.markdown-display input[type='checkbox'] {
+  margin-right: 8px;
 }
 
 .empty-state {
@@ -955,6 +1098,7 @@ button {
   align-items: center;
   gap: 10px;
   min-width: 0;
+  position: relative;
 }
 
 .settings-row-title > div {
@@ -979,6 +1123,28 @@ button {
 
 .settings-drag-handle {
   flex: 0 0 auto;
+}
+
+.color-dot-button {
+  padding: 0;
+  border: 0;
+  background: transparent;
+  display: inline-flex;
+  align-items: center;
+}
+
+.color-picker-inline {
+  display: inline-flex;
+  align-items: center;
+}
+
+.color-picker-inline input[type='color'] {
+  width: 28px;
+  height: 22px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  cursor: pointer;
 }
 
 .settings-drag-placeholder {
