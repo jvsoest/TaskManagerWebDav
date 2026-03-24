@@ -220,6 +220,14 @@ function matchesDate(task: TaskItem, filter: TaskFilter): boolean {
   }
 
   const candidate = task.dueDate ?? task.startDate
+  return matchesDateValue(candidate, task.status, filter)
+}
+
+function matchesDateValue(
+  candidate: string | undefined,
+  taskStatus: TaskItem['status'],
+  filter: Pick<TaskFilter, 'datePreset' | 'customFrom' | 'customTo'>,
+): boolean {
   if (!candidate) {
     return false
   }
@@ -229,7 +237,7 @@ function matchesDate(task: TaskItem, filter: TaskFilter): boolean {
   today.setHours(0, 0, 0, 0)
 
   if (filter.datePreset === 'overdue') {
-    return date < today && task.status !== 'completed'
+    return date < today && taskStatus !== 'completed'
   }
 
   if (filter.datePreset === 'today') {
@@ -583,16 +591,30 @@ function taskMatchesStatusAlias(task: TaskItem, value: string): boolean {
   return task.status === normalized
 }
 
-function taskMatchesNamedDate(task: TaskItem, value: string): boolean {
+type SmartDateField = 'start' | 'due' | 'either'
+
+function candidateDateForField(task: TaskItem, field: SmartDateField): string | undefined {
+  if (field === 'start') {
+    return task.startDate
+  }
+  if (field === 'due') {
+    return task.dueDate
+  }
+  return task.dueDate ?? task.startDate
+}
+
+function taskMatchesNamedDate(task: TaskItem, value: string, field: SmartDateField = 'either'): boolean {
   const upcomingWindow = parseUpcomingDays(value)
+  const candidate = candidateDateForField(task, field)
+
   if (upcomingWindow !== undefined) {
-    return matchesDate(task, {
+    return matchesDateValue(candidate, task.status, {
       ...defaultFilter(),
       datePreset: `next${upcomingWindow}`,
     })
   }
 
-  return matchesDate(task, {
+  return matchesDateValue(candidate, task.status, {
     ...defaultFilter(),
     datePreset: value as TaskFilter['datePreset'],
   })
@@ -606,6 +628,18 @@ function parseUpcomingDays(value: string): number | undefined {
 
   const days = Number.parseInt(match[1], 10)
   return Number.isFinite(days) && days > 0 ? days : undefined
+}
+
+function parseSmartDateTerm(value: string): { field: SmartDateField; preset: string } | undefined {
+  const match = /^(start|due|end):(today|overdue|next\d+)$/i.exec(value.trim())
+  if (!match) {
+    return undefined
+  }
+
+  return {
+    field: match[1].toLowerCase() === 'start' ? 'start' : 'due',
+    preset: match[2].toLowerCase(),
+  }
 }
 
 function resolveCollectionIdsByName(value: string, collections: TaskCollection[]): string[] {
@@ -635,6 +669,11 @@ function taskMatchesDefinitionTerm(
 
   if (/^p[1-4]$/i.test(normalized)) {
     return task.priority === Number.parseInt(normalized.slice(1), 10)
+  }
+
+  const smartDateTerm = parseSmartDateTerm(normalized)
+  if (smartDateTerm) {
+    return taskMatchesNamedDate(task, smartDateTerm.preset, smartDateTerm.field)
   }
 
   if (lowered === 'today' || lowered === 'overdue' || parseUpcomingDays(lowered) !== undefined) {

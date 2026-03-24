@@ -3164,12 +3164,12 @@ function App() {
               <input
                 value={smartDraftDefinition}
                 onChange={(event) => setSmartDraftDefinition(event.target.value)}
-                placeholder='Example: #work & next14 & !status:completed'
+                placeholder='Example: #work & (due:next14 | start:today) & !status:completed'
               />
               <div className="simple-row">
                 <div>
                   <strong>Supported syntax</strong>
-                  <span>Use `&`, `|`, `!`, parentheses, `#tag`, `p1`-`p4`, `status:open`, `today`, `overdue`, `next7`, `next14`, `next30`, `list:"Name"`, and `subtree:"Name"`.</span>
+                  <span>Use `&`, `|`, `!`, parentheses, `#tag`, `p1`-`p4`, `status:open`, `today`, `overdue`, `next7`, `next14`, `next30`, `start:today`, `due:overdue`, `end:next14`, `list:"Name"`, and `subtree:"Name"`.</span>
                 </div>
               </div>
               <div className="settings-form split">
