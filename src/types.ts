@@ -39,13 +39,6 @@ export interface TaskCollection {
   syncToken?: string
 }
 
-export interface FolderNode {
-  id: string
-  accountId: string
-  name: string
-  parentId?: string
-}
-
 export interface TagNode {
   id: string
   accountId: string
@@ -55,11 +48,11 @@ export interface TagNode {
 
 export interface MetadataDocument {
   accountId: string
-  version: 1
-  folderNodes: FolderNode[]
+  version: 2
   tagNodes: TagNode[]
-  collectionFolders: Record<string, string | undefined>
+  collectionParents: Record<string, string | undefined>
   collectionOrder: string[]
+  smartListOrder: string[]
   taskListOrderings: Record<string, TaskOrdering | undefined>
   manualTaskOrder: Record<string, string[] | undefined>
   updatedAt: string
@@ -92,9 +85,9 @@ export interface TaskFilter {
   statuses: TaskStatus[]
   tagIds: string[]
   includeDescendantTags: boolean
-  folderIds: string[]
-  includeSubfolders: boolean
-  datePreset: 'any' | 'overdue' | 'today' | 'next7' | 'custom'
+  collectionIds: string[]
+  includeDescendantCollections: boolean
+  datePreset: 'any' | 'overdue' | 'today' | `next${number}` | 'custom'
   customFrom?: string
   customTo?: string
 }
@@ -102,6 +95,7 @@ export interface TaskFilter {
 export interface SmartList {
   id: string
   accountId: string
+  definition: string
   name: string
   filter: TaskFilter
   ordering: TaskOrdering

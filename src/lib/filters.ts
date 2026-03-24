@@ -2,7 +2,6 @@ import type {
   MetadataDocument,
   SmartList,
   SortDirection,
-  TagNode,
   TaskCollection,
   TaskFilter,
   TaskItem,
@@ -10,24 +9,33 @@ import type {
   TaskOrdering,
 } from '../types'
 
+type SmartListToken =
+  | { kind: 'and' | 'or' | 'not' | 'lparen' | 'rparen' }
+  | { kind: 'term'; value: string }
+
+type SmartListAst =
+  | { kind: 'term'; value: string }
+  | { kind: 'not'; child: SmartListAst }
+  | { kind: 'and' | 'or'; left: SmartListAst; right: SmartListAst }
+
 export const defaultFilter = (): TaskFilter => ({
   query: '',
   statuses: [],
   tagIds: [],
   includeDescendantTags: true,
-  folderIds: [],
-  includeSubfolders: true,
+  collectionIds: [],
+  includeDescendantCollections: true,
   datePreset: 'any',
 })
 
 export function createDefaultMetadata(accountId: string): MetadataDocument {
   return {
     accountId,
-    version: 1,
-    folderNodes: [],
+    version: 2,
     tagNodes: [],
-    collectionFolders: {},
+    collectionParents: {},
     collectionOrder: [],
+    smartListOrder: [],
     taskListOrderings: {},
     manualTaskOrder: {},
     updatedAt: new Date().toISOString(),
@@ -61,14 +69,28 @@ export function normalizeOrdering(
   }
 }
 
-export function serializeFilter(filter: TaskFilter): string {
-  return JSON.stringify(filter, null, 2)
+export function extractHashtags(...parts: Array<string | undefined>): string[] {
+  const matches = new Set<string>()
+  const pattern = /(^|[\s(])#([\p{L}\p{N}_-]+)/gu
+
+  parts.forEach((part) => {
+    if (!part) {
+      return
+    }
+
+    let match: RegExpExecArray | null
+    while ((match = pattern.exec(part)) !== null) {
+      matches.add(`#${match[2].toLowerCase()}`)
+    }
+  })
+
+  return Array.from(matches).sort()
 }
 
-export function serializeSmartListPayload(smartList: Pick<SmartList, 'filter' | 'ordering'>): string {
+export function serializeSmartListPayload(smartList: Pick<SmartList, 'definition' | 'ordering'>): string {
   return JSON.stringify(
     {
-      filter: smartList.filter,
+      definition: smartList.definition,
       ordering: smartList.ordering,
     },
     null,
@@ -83,29 +105,49 @@ export function parseFilter(value: string): TaskFilter {
       ...defaultFilter(),
       ...parsed,
       statuses: parsed.statuses ?? [],
-      tagIds: parsed.tagIds ?? [],
-      folderIds: parsed.folderIds ?? [],
+      tagIds: (parsed.tagIds ?? []).map(normalizeHashtag).filter(Boolean),
+      collectionIds: parsed.collectionIds ?? [],
     }
   } catch {
     return defaultFilter()
   }
 }
 
-export function parseSmartListPayload(value: string): Pick<SmartList, 'filter' | 'ordering'> {
+export function parseSmartListPayload(value: string): {
+  definition: string
+  ordering: TaskOrdering
+  legacyFilter?: TaskFilter
+} {
   try {
-    const parsed = JSON.parse(value) as { filter?: Partial<TaskFilter>; ordering?: Partial<TaskOrdering> }
-    if (parsed && typeof parsed === 'object' && 'filter' in parsed) {
-      return {
-        filter: parseFilter(JSON.stringify(parsed.filter ?? {})),
-        ordering: normalizeOrdering(parsed.ordering, defaultSmartListOrdering()),
+    const parsed = JSON.parse(value) as {
+      definition?: string
+      filter?: Partial<TaskFilter>
+      ordering?: Partial<TaskOrdering>
+    }
+
+    if (parsed && typeof parsed === 'object') {
+      if (typeof parsed.definition === 'string') {
+        return {
+          definition: parsed.definition,
+          ordering: normalizeOrdering(parsed.ordering, defaultSmartListOrdering()),
+        }
+      }
+
+      if ('filter' in parsed) {
+        const legacyFilter = parseFilter(JSON.stringify(parsed.filter ?? {}))
+        return {
+          definition: '',
+          legacyFilter,
+          ordering: normalizeOrdering(parsed.ordering, defaultSmartListOrdering()),
+        }
       }
     }
   } catch {
-    // Fall through to legacy handling.
+    // Fall through to legacy string handling.
   }
 
   return {
-    filter: parseFilter(value),
+    definition: value.trim(),
     ordering: defaultSmartListOrdering(),
   }
 }
@@ -120,7 +162,7 @@ function isSortDirection(value: unknown): value is SortDirection {
   return value === 'asc' || value === 'desc'
 }
 
-function descendants(ids: string[], tree: Array<{ id: string; parentId?: string }>): Set<string> {
+export function expandTreeIds(ids: string[], tree: Array<{ id: string; parentId?: string }>): Set<string> {
   const scope = new Set(ids)
   let expanded = true
 
@@ -137,34 +179,37 @@ function descendants(ids: string[], tree: Array<{ id: string; parentId?: string 
   return scope
 }
 
-function tagScope(filter: TaskFilter, tagNodes: TagNode[]): Set<string> | undefined {
+function tagScope(filter: TaskFilter): Set<string> | undefined {
   if (filter.tagIds.length === 0) {
     return undefined
   }
 
-  return filter.includeDescendantTags ? descendants(filter.tagIds, tagNodes) : new Set(filter.tagIds)
+  return new Set(filter.tagIds.map(normalizeHashtag).filter(Boolean))
 }
 
-function folderScope(
+function collectionScope(
   filter: TaskFilter,
   metadataDoc: MetadataDocument,
   collections: TaskCollection[],
 ): Set<string> | undefined {
-  if (filter.folderIds.length === 0) {
+  if (filter.collectionIds.length === 0) {
     return undefined
   }
 
-  const allowedFolders = filter.includeSubfolders
-    ? descendants(filter.folderIds, metadataDoc.folderNodes)
-    : new Set(filter.folderIds)
+  const listTree = collections
+    .filter((collection) => collection.kind === 'task')
+    .map((collection) => ({
+      id: collection.id,
+      parentId: metadataDoc.collectionParents[collection.id],
+    }))
+
+  const allowedCollections = filter.includeDescendantCollections
+    ? expandTreeIds(filter.collectionIds, listTree)
+    : new Set(filter.collectionIds)
 
   return new Set(
     collections
-      .filter((collection) => collection.kind === 'task')
-      .filter((collection) => {
-        const folderId = metadataDoc.collectionFolders[collection.id]
-        return folderId ? allowedFolders.has(folderId) : false
-      })
+      .filter((collection) => collection.kind === 'task' && allowedCollections.has(collection.id))
       .map((collection) => collection.id),
   )
 }
@@ -182,8 +227,6 @@ function matchesDate(task: TaskItem, filter: TaskFilter): boolean {
   const date = new Date(candidate)
   const today = new Date()
   today.setHours(0, 0, 0, 0)
-  const sevenDays = new Date(today)
-  sevenDays.setDate(sevenDays.getDate() + 7)
 
   if (filter.datePreset === 'overdue') {
     return date < today && task.status !== 'completed'
@@ -195,8 +238,12 @@ function matchesDate(task: TaskItem, filter: TaskFilter): boolean {
     return date >= today && date <= end
   }
 
-  if (filter.datePreset === 'next7') {
-    return date >= today && date <= sevenDays
+  const upcomingWindow = parseUpcomingDays(filter.datePreset)
+  if (upcomingWindow !== undefined) {
+    const end = new Date(today)
+    end.setDate(end.getDate() + upcomingWindow)
+    end.setHours(23, 59, 59, 999)
+    return date >= today && date <= end
   }
 
   const from = filter.customFrom ? new Date(filter.customFrom) : undefined
@@ -235,12 +282,13 @@ export function taskMatchesFilter(
     return false
   }
 
-  const allowedTags = tagScope(filter, metadataDoc.tagNodes)
-  if (allowedTags && !task.tagIds.some((tagId) => allowedTags.has(tagId))) {
+  const taskTags = new Set(task.tagIds.map(normalizeHashtag).filter(Boolean))
+  const allowedTags = tagScope(filter)
+  if (allowedTags && !Array.from(allowedTags).some((tag) => taskTags.has(tag))) {
     return false
   }
 
-  const allowedCollections = folderScope(filter, metadataDoc, collections)
+  const allowedCollections = collectionScope(filter, metadataDoc, collections)
   if (allowedCollections && !allowedCollections.has(task.collectionId)) {
     return false
   }
@@ -254,7 +302,7 @@ export function getSmartListCount(
   metadataDoc: MetadataDocument,
   collections: TaskCollection[],
 ): number {
-  return tasks.filter((task) => taskMatchesFilter(task, smartList.filter, metadataDoc, collections)).length
+  return tasks.filter((task) => taskMatchesSmartList(task, smartList, metadataDoc, collections)).length
 }
 
 function compareStrings(left: string | undefined, right: string | undefined, direction: SortDirection): number {
@@ -348,4 +396,370 @@ function compareTaskWithFallback(left: TaskItem, right: TaskItem, ordering: Task
   ]
 
   return comparisons.find((value) => value !== 0) ?? 0
+}
+
+function normalizeHashtag(value: string): string {
+  const trimmed = value.trim().toLowerCase()
+  if (!trimmed) {
+    return ''
+  }
+  return trimmed.startsWith('#') ? trimmed : `#${trimmed}`
+}
+
+function tokenizeSmartListDefinition(definition: string): SmartListToken[] {
+  const tokens: SmartListToken[] = []
+  let index = 0
+
+  while (index < definition.length) {
+    const current = definition[index]
+
+    if (/\s/.test(current)) {
+      index += 1
+      continue
+    }
+
+    if (current === '&') {
+      tokens.push({ kind: 'and' })
+      index += 1
+      continue
+    }
+
+    if (current === '|') {
+      tokens.push({ kind: 'or' })
+      index += 1
+      continue
+    }
+
+    if (current === '!') {
+      tokens.push({ kind: 'not' })
+      index += 1
+      continue
+    }
+
+    if (current === '(') {
+      tokens.push({ kind: 'lparen' })
+      index += 1
+      continue
+    }
+
+    if (current === ')') {
+      tokens.push({ kind: 'rparen' })
+      index += 1
+      continue
+    }
+
+    if (current === '"') {
+      let value = ''
+      index += 1
+      while (index < definition.length && definition[index] !== '"') {
+        if (definition[index] === '\\' && index + 1 < definition.length) {
+          index += 1
+        }
+        value += definition[index]
+        index += 1
+      }
+      if (index >= definition.length) {
+        throw new Error('Unterminated quoted string in smart list definition.')
+      }
+      index += 1
+      tokens.push({ kind: 'term', value })
+      continue
+    }
+
+    const colonQuoteMatch = definition.slice(index).match(/^([a-z_]+):"((?:[^"\\]|\\.)*)"/i)
+    if (colonQuoteMatch) {
+      tokens.push({
+        kind: 'term',
+        value: `${colonQuoteMatch[1]}:${colonQuoteMatch[2].replace(/\\"/g, '"')}`,
+      })
+      index += colonQuoteMatch[0].length
+      continue
+    }
+
+    let end = index
+    while (end < definition.length && !/[\s&|!()]/.test(definition[end])) {
+      end += 1
+    }
+    tokens.push({ kind: 'term', value: definition.slice(index, end) })
+    index = end
+  }
+
+  return tokens
+}
+
+function parseSmartListDefinition(definition: string): SmartListAst | undefined {
+  const tokens = tokenizeSmartListDefinition(definition.trim())
+  if (tokens.length === 0) {
+    return undefined
+  }
+
+  let index = 0
+
+  function parseOr(): SmartListAst {
+    let left = parseAnd()
+    while (tokens[index]?.kind === 'or') {
+      index += 1
+      left = {
+        kind: 'or',
+        left,
+        right: parseAnd(),
+      }
+    }
+    return left
+  }
+
+  function parseAnd(): SmartListAst {
+    let left = parseUnary()
+    while (tokens[index]?.kind === 'and') {
+      index += 1
+      left = {
+        kind: 'and',
+        left,
+        right: parseUnary(),
+      }
+    }
+    return left
+  }
+
+  function parseUnary(): SmartListAst {
+    const token = tokens[index]
+    if (!token) {
+      throw new Error('Unexpected end of smart list definition.')
+    }
+
+    if (token.kind === 'not') {
+      index += 1
+      return {
+        kind: 'not',
+        child: parseUnary(),
+      }
+    }
+
+    if (token.kind === 'lparen') {
+      index += 1
+      const expression = parseOr()
+      if (tokens[index]?.kind !== 'rparen') {
+        throw new Error('Missing closing parenthesis in smart list definition.')
+      }
+      index += 1
+      return expression
+    }
+
+    if (token.kind === 'term') {
+      index += 1
+      return {
+        kind: 'term',
+        value: token.value,
+      }
+    }
+
+    throw new Error('Invalid smart list definition.')
+  }
+
+  const ast = parseOr()
+  if (index !== tokens.length) {
+    throw new Error('Invalid trailing tokens in smart list definition.')
+  }
+
+  return ast
+}
+
+function fullTextMatch(task: TaskItem, needle: string): boolean {
+  const haystack = `${task.title} ${task.notes}`.toLowerCase()
+  return haystack.includes(needle.toLowerCase())
+}
+
+function taskMatchesStatusAlias(task: TaskItem, value: string): boolean {
+  const normalized = value.toLowerCase()
+  if (normalized === 'open') {
+    return task.status === 'needs-action' || task.status === 'in-process'
+  }
+  if (normalized === 'completed') {
+    return task.status === 'completed'
+  }
+  if (normalized === 'in-progress') {
+    return task.status === 'in-process'
+  }
+  return task.status === normalized
+}
+
+function taskMatchesNamedDate(task: TaskItem, value: string): boolean {
+  const upcomingWindow = parseUpcomingDays(value)
+  if (upcomingWindow !== undefined) {
+    return matchesDate(task, {
+      ...defaultFilter(),
+      datePreset: `next${upcomingWindow}`,
+    })
+  }
+
+  return matchesDate(task, {
+    ...defaultFilter(),
+    datePreset: value as TaskFilter['datePreset'],
+  })
+}
+
+function parseUpcomingDays(value: string): number | undefined {
+  const match = /^next(\d+)$/i.exec(value.trim())
+  if (!match) {
+    return undefined
+  }
+
+  const days = Number.parseInt(match[1], 10)
+  return Number.isFinite(days) && days > 0 ? days : undefined
+}
+
+function resolveCollectionIdsByName(value: string, collections: TaskCollection[]): string[] {
+  const normalized = value.trim().toLowerCase()
+  return collections
+    .filter((collection) => collection.kind === 'task' && collection.displayName.trim().toLowerCase() === normalized)
+    .map((collection) => collection.id)
+}
+
+function taskMatchesDefinitionTerm(
+  term: string,
+  task: TaskItem,
+  metadataDoc: MetadataDocument,
+  collections: TaskCollection[],
+): boolean {
+  const normalized = term.trim()
+  const taskTags = new Set(task.tagIds.map(normalizeHashtag).filter(Boolean))
+  const lowered = normalized.toLowerCase()
+
+  if (!normalized) {
+    return true
+  }
+
+  if (normalized.startsWith('#')) {
+    return taskTags.has(normalizeHashtag(normalized))
+  }
+
+  if (/^p[1-4]$/i.test(normalized)) {
+    return task.priority === Number.parseInt(normalized.slice(1), 10)
+  }
+
+  if (lowered === 'today' || lowered === 'overdue' || parseUpcomingDays(lowered) !== undefined) {
+    return taskMatchesNamedDate(task, lowered)
+  }
+
+  if (lowered.startsWith('status:')) {
+    return taskMatchesStatusAlias(task, normalized.slice('status:'.length))
+  }
+
+  if (lowered.startsWith('list:')) {
+    const matchingCollectionIds = new Set(resolveCollectionIdsByName(normalized.slice('list:'.length), collections))
+    return matchingCollectionIds.has(task.collectionId)
+  }
+
+  if (lowered.startsWith('subtree:')) {
+    const matchingCollectionIds = resolveCollectionIdsByName(normalized.slice('subtree:'.length), collections)
+    const allowed = expandTreeIds(
+      matchingCollectionIds,
+      collections
+        .filter((collection) => collection.kind === 'task')
+        .map((collection) => ({
+          id: collection.id,
+          parentId: metadataDoc.collectionParents[collection.id],
+        })),
+    )
+    return allowed.has(task.collectionId)
+  }
+
+  return fullTextMatch(task, normalized)
+}
+
+function evaluateSmartListAst(
+  ast: SmartListAst,
+  task: TaskItem,
+  metadataDoc: MetadataDocument,
+  collections: TaskCollection[],
+): boolean {
+  if (ast.kind === 'term') {
+    return taskMatchesDefinitionTerm(ast.value, task, metadataDoc, collections)
+  }
+
+  if (ast.kind === 'not') {
+    return !evaluateSmartListAst(ast.child, task, metadataDoc, collections)
+  }
+
+  if (ast.kind === 'and') {
+    return (
+      evaluateSmartListAst(ast.left, task, metadataDoc, collections) &&
+      evaluateSmartListAst(ast.right, task, metadataDoc, collections)
+    )
+  }
+
+  return (
+    evaluateSmartListAst(ast.left, task, metadataDoc, collections) ||
+    evaluateSmartListAst(ast.right, task, metadataDoc, collections)
+  )
+}
+
+export function validateSmartListDefinition(definition: string): string | undefined {
+  try {
+    parseSmartListDefinition(definition)
+    return undefined
+  } catch (error) {
+    return error instanceof Error ? error.message : 'Invalid smart list definition.'
+  }
+}
+
+export function taskMatchesSmartList(
+  task: TaskItem,
+  smartList: Pick<SmartList, 'definition' | 'filter'>,
+  metadataDoc: MetadataDocument,
+  collections: TaskCollection[],
+): boolean {
+  const definition = smartList.definition.trim()
+  if (definition) {
+    try {
+      const ast = parseSmartListDefinition(definition)
+      return ast ? evaluateSmartListAst(ast, task, metadataDoc, collections) : true
+    } catch {
+      return false
+    }
+  }
+
+  return taskMatchesFilter(task, smartList.filter, metadataDoc, collections)
+}
+
+export function smartListDefinitionFromFilter(
+  filter: TaskFilter,
+  collections: TaskCollection[],
+): string {
+  const terms: string[] = []
+
+  if (filter.query.trim()) {
+    terms.push(JSON.stringify(filter.query.trim()))
+  }
+
+  filter.statuses.forEach((status) => {
+    if (status === 'needs-action') {
+      terms.push('status:open')
+    } else if (status === 'in-process') {
+      terms.push('status:in-progress')
+    } else {
+      terms.push(`status:${status}`)
+    }
+  })
+
+  filter.tagIds.forEach((tag) => {
+    terms.push(normalizeHashtag(tag))
+  })
+
+  filter.collectionIds.forEach((collectionId) => {
+    const displayName = collections.find((collection) => collection.id === collectionId)?.displayName ?? collectionId
+    terms.push(`${filter.includeDescendantCollections ? 'subtree' : 'list'}:${JSON.stringify(displayName)}`)
+  })
+
+  if (filter.datePreset !== 'any') {
+    if (
+      filter.datePreset === 'today' ||
+      filter.datePreset === 'overdue' ||
+      parseUpcomingDays(filter.datePreset) !== undefined
+    ) {
+      terms.push(filter.datePreset)
+    }
+  }
+
+  return terms.join(' & ')
 }

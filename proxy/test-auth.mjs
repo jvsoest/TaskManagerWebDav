@@ -1,4 +1,4 @@
-const PROXY_URL = process.env.PROXY_URL ?? 'http://localhost:8787/'
+const PROXY_URL = process.env.PROXY_URL ?? 'http://localhost:8787/dav'
 const SERVER_URL = process.env.SERVER_URL ?? 'https://api.cirrux.co/'
 const USERNAME = process.env.CALDAV_USERNAME ?? ''
 const PASSWORD = process.env.CALDAV_PASSWORD ?? ''
@@ -34,7 +34,7 @@ const principalPropfindBody = `<?xml version="1.0" encoding="utf-8" ?>
 </d:propfind>`
 
 async function requestViaProxy(url, body = propfindBody) {
-  const endpoint = new URL('dav', ensureTrailingSlash(PROXY_URL)).toString()
+  const endpoint = ensureTrailingSlash(PROXY_URL).replace(/\/$/, '')
   let response
   try {
     response = await fetch(endpoint, {

@@ -127,6 +127,7 @@ async function forwardRequest(url, method, headers, body) {
 
 async function handleDavProxy(request, response) {
   const origin = request.headers.origin ?? ''
+  const requestPath = new URL(request.url ?? '/', `http://${request.headers.host ?? `localhost:${PORT}`}`).pathname
 
   if (request.method === 'OPTIONS') {
     setCorsHeaders(response, origin)
@@ -135,7 +136,7 @@ async function handleDavProxy(request, response) {
     return
   }
 
-  if (request.url !== '/dav' || request.method !== 'POST') {
+  if (!['/', '/dav'].includes(requestPath) || request.method !== 'POST') {
     writeJson(response, 404, { error: 'Not found.' }, origin)
     return
   }
@@ -233,7 +234,12 @@ async function handleStaticRequest(request, response) {
 }
 
 const server = http.createServer(async (request, response) => {
-  if ((request.url ?? '').startsWith('/dav')) {
+  const requestPath = new URL(request.url ?? '/', `http://${request.headers.host ?? `localhost:${PORT}`}`).pathname
+
+  if (
+    requestPath.startsWith('/dav') ||
+    (requestPath === '/' && ['POST', 'OPTIONS'].includes(request.method ?? 'GET'))
+  ) {
     await handleDavProxy(request, response)
     return
   }

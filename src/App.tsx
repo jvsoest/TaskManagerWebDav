@@ -5,10 +5,14 @@ import {
   defaultFilter,
   defaultSmartListOrdering,
   defaultTaskListOrdering,
+  expandTreeIds,
+  extractHashtags,
   getSmartListCount,
   normalizeOrdering,
   sortTasks,
   taskMatchesFilter,
+  taskMatchesSmartList,
+  validateSmartListDefinition,
 } from './lib/filters'
 import { clearLocalCache, loadSnapshot, saveSnapshot } from './lib/idb'
 import { notifyDueTasks, requestNotifications } from './lib/notifications'
@@ -28,13 +32,10 @@ import type {
   Account,
   AccountConnectionInput,
   AppSnapshot,
-  FolderNode,
   MetadataDocument,
   SmartList,
   SortDirection,
   SyncLogEntry,
-  TagNode,
-  TaskFilter,
   TaskItem,
   TaskOrderField,
   TaskOrdering,
@@ -42,12 +43,12 @@ import type {
 } from './types'
 
 type ActiveView =
-  | { kind: 'all' }
   | { kind: 'collection'; collectionId: string }
   | { kind: 'smart'; smartListId: string }
 
 type WorkspaceMode = 'tasks' | 'settings'
-type SettingsSection = 'accounts' | 'structure' | 'tags'
+type SettingsSection = 'accounts' | 'structure'
+type CollectionViewScope = 'self' | 'self-and-descendants'
 
 type TaskDraft = Omit<TaskItem, 'id' | 'uid' | 'createdAt' | 'updatedAt' | 'syncState'> & {
   id?: string
@@ -66,6 +67,30 @@ type DragSession = {
 
 type PendingTaskPress = {
   taskId: string
+  pointerX: number
+  pointerY: number
+  offsetX: number
+  offsetY: number
+  width: number
+  height: number
+}
+
+type SettingsDragSession = {
+  kind: 'collection' | 'smart'
+  itemId: string
+  parentId?: string
+  pointerX: number
+  pointerY: number
+  offsetX: number
+  offsetY: number
+  width: number
+  height: number
+}
+
+type PendingSettingsPress = {
+  kind: 'collection' | 'smart'
+  itemId: string
+  parentId?: string
   pointerX: number
   pointerY: number
   offsetX: number
@@ -114,7 +139,7 @@ function createDraft(collectionId?: string, accountId?: string): TaskDraft {
     title: '',
     notes: '',
     status: 'needs-action',
-    priority: 1,
+    priority: 0,
     tagIds: [],
   }
 }
@@ -194,13 +219,6 @@ function sameTaskDraft(left: TaskDraft, right: TaskDraft): boolean {
   )
 }
 
-function moveInArray<T>(items: T[], fromIndex: number, toIndex: number): T[] {
-  const next = [...items]
-  const [moved] = next.splice(fromIndex, 1)
-  next.splice(toIndex, 0, moved)
-  return next
-}
-
 function moveTaskIdToIndex(items: string[], taskId: string, targetIndex: number): string[] {
   const fromIndex = items.indexOf(taskId)
   if (fromIndex < 0) {
@@ -212,6 +230,44 @@ function moveTaskIdToIndex(items: string[], taskId: string, targetIndex: number)
   const insertIndex = Math.max(0, Math.min(targetIndex, next.length))
   next.splice(insertIndex, 0, taskId)
   return next
+}
+
+function moveIdToIndex(items: string[], itemId: string, targetIndex: number): string[] {
+  const fromIndex = items.indexOf(itemId)
+  if (fromIndex < 0) {
+    return items
+  }
+
+  const next = [...items]
+  next.splice(fromIndex, 1)
+  const insertIndex = Math.max(0, Math.min(targetIndex, next.length))
+  next.splice(insertIndex, 0, itemId)
+  return next
+}
+
+function moveCollectionIdWithinParent(
+  collectionIds: string[],
+  collectionParents: Record<string, string | undefined>,
+  collectionId: string,
+  targetIndex: number,
+): string[] {
+  const parentId = collectionParents[collectionId]
+  const siblingIds = collectionIds.filter((id) => collectionParents[id] === parentId)
+  if (!siblingIds.includes(collectionId)) {
+    return collectionIds
+  }
+
+  const nextSiblingIds = moveIdToIndex(siblingIds, collectionId, targetIndex)
+  let cursor = 0
+
+  return collectionIds.map((id) => {
+    if (collectionParents[id] !== parentId) {
+      return id
+    }
+    const nextId = nextSiblingIds[cursor]
+    cursor += 1
+    return nextId
+  })
 }
 
 function buildTreeOptions<T extends { id: string; name: string; parentId?: string }>(nodes: T[]) {
@@ -241,75 +297,23 @@ function buildTreeOptions<T extends { id: string; name: string; parentId?: strin
   return result
 }
 
-function reorderSiblingNodes<T extends { id: string; parentId?: string }>(
-  nodes: T[],
-  nodeId: string,
-  direction: 'up' | 'down',
-): T[] {
-  const node = nodes.find((entry) => entry.id === nodeId)
-  if (!node) {
-    return nodes
-  }
-
-  const siblingIds = nodes.filter((entry) => entry.parentId === node.parentId).map((entry) => entry.id)
-  const currentIndex = siblingIds.indexOf(nodeId)
-  const targetIndex = direction === 'up' ? currentIndex - 1 : currentIndex + 1
-
-  if (currentIndex < 0 || targetIndex < 0 || targetIndex >= siblingIds.length) {
-    return nodes
-  }
-
-  const targetId = siblingIds[targetIndex]
-  const fullFromIndex = nodes.findIndex((entry) => entry.id === nodeId)
-  const fullToIndex = nodes.findIndex((entry) => entry.id === targetId)
-
-  if (fullFromIndex < 0 || fullToIndex < 0) {
-    return nodes
-  }
-
-  return moveInArray(nodes, fullFromIndex, fullToIndex)
-}
-
-function reorderCollectionIdsWithinFolder(
-  collectionIds: string[],
-  collectionFolders: Record<string, string | undefined>,
-  collectionId: string,
-  direction: 'up' | 'down',
-): string[] {
-  const folderId = collectionFolders[collectionId]
-  const siblingIds = collectionIds.filter((id) => collectionFolders[id] === folderId)
-  const currentIndex = siblingIds.indexOf(collectionId)
-  const targetIndex = direction === 'up' ? currentIndex - 1 : currentIndex + 1
-
-  if (currentIndex < 0 || targetIndex < 0 || targetIndex >= siblingIds.length) {
-    return collectionIds
-  }
-
-  const targetId = siblingIds[targetIndex]
-  const fromIndex = collectionIds.indexOf(collectionId)
-  const toIndex = collectionIds.indexOf(targetId)
-
-  if (fromIndex < 0 || toIndex < 0) {
-    return collectionIds
-  }
-
-  return moveInArray(collectionIds, fromIndex, toIndex)
+function settingsRowKey(kind: 'collection' | 'smart', itemId: string): string {
+  return `${kind}:${itemId}`
 }
 
 function App() {
   const [snapshot, setSnapshot] = useState<AppSnapshot>(emptySnapshot)
   const [hydrated, setHydrated] = useState(false)
   const [activeAccountId, setActiveAccountId] = useState<string>()
-  const [activeView, setActiveView] = useState<ActiveView>({ kind: 'all' })
+  const [activeView, setActiveView] = useState<ActiveView>()
+  const [collectionViewScope, setCollectionViewScope] = useState<CollectionViewScope>('self-and-descendants')
   const [selectedTaskId, setSelectedTaskId] = useState<string>()
   const [taskDraft, setTaskDraft] = useState<TaskDraft>(createDraft())
   const [connectionForm, setConnectionForm] = useState<AccountConnectionInput>(emptyConnection)
-  const [folderDraft, setFolderDraft] = useState({ name: '', parentId: '' })
-  const [tagDraft, setTagDraft] = useState({ name: '', parentId: '' })
-  const [listDraft, setListDraft] = useState({ name: '', folderId: '' })
+  const [listDraft, setListDraft] = useState({ name: '', parentId: '' })
   const [smartDraftId, setSmartDraftId] = useState<string>()
   const [smartDraftName, setSmartDraftName] = useState('')
-  const [smartDraftFilter, setSmartDraftFilter] = useState<TaskFilter>(defaultFilter())
+  const [smartDraftDefinition, setSmartDraftDefinition] = useState('')
   const [smartDraftOrdering, setSmartDraftOrdering] = useState<TaskOrdering>(defaultSmartListOrdering())
   const [searchText, setSearchText] = useState('')
   const [quickAddTitle, setQuickAddTitle] = useState('')
@@ -318,14 +322,18 @@ function App() {
   const [isCreatingTask, setIsCreatingTask] = useState(false)
   const [isSidebarOpen, setIsSidebarOpen] = useState(false)
   const [isSmartEditorOpen, setIsSmartEditorOpen] = useState(false)
-  const [collapsedFolders, setCollapsedFolders] = useState<string[]>([])
+  const [collapsedCollections, setCollapsedCollections] = useState<string[]>([])
   const [dragSession, setDragSession] = useState<DragSession>()
   const [pendingTaskPress, setPendingTaskPress] = useState<PendingTaskPress>()
   const [dropIndex, setDropIndex] = useState<number>()
+  const [settingsDragSession, setSettingsDragSession] = useState<SettingsDragSession>()
+  const [pendingSettingsPress, setPendingSettingsPress] = useState<PendingSettingsPress>()
+  const [settingsDropIndex, setSettingsDropIndex] = useState<number>()
   const [workspaceMode, setWorkspaceMode] = useState<WorkspaceMode>('tasks')
   const [settingsSection, setSettingsSection] = useState<SettingsSection>('accounts')
   const deliveredRef = useRef<Set<string>>(new Set())
   const taskRowsRef = useRef<Map<string, HTMLDivElement>>(new Map())
+  const settingsRowsRef = useRef<Map<string, HTMLDivElement>>(new Map())
   const suppressTaskClickRef = useRef(false)
   const deferredSearch = useDeferredValue(searchText)
 
@@ -379,14 +387,70 @@ function App() {
         .filter((collection): collection is (typeof taskCollections)[number] => Boolean(collection)),
     [orderedCollectionIds, taskCollections],
   )
-  const folderTreeOptions = useMemo(
-    () => buildTreeOptions<FolderNode>(metadataDoc?.folderNodes ?? []),
-    [metadataDoc?.folderNodes],
+  const orderedSmartListIds = useMemo(() => {
+    const ids = activeSmartLists.map((smartList) => smartList.id)
+    const preferred = (metadataDoc?.smartListOrder ?? []).filter((id) => ids.includes(id))
+    const missing = ids.filter((id) => !preferred.includes(id))
+    return [...preferred, ...missing]
+  }, [activeSmartLists, metadataDoc?.smartListOrder])
+  const orderedSmartLists = useMemo(
+    () =>
+      orderedSmartListIds
+        .map((id) => activeSmartLists.find((smartList) => smartList.id === id))
+        .filter((smartList): smartList is (typeof activeSmartLists)[number] => Boolean(smartList)),
+    [activeSmartLists, orderedSmartListIds],
   )
-  const tagTreeOptions = useMemo(
-    () => buildTreeOptions<TagNode>(metadataDoc?.tagNodes ?? []),
-    [metadataDoc?.tagNodes],
+  const renderedSmartLists = useMemo(() => {
+    if (settingsDragSession?.kind !== 'smart') {
+      return orderedSmartLists
+    }
+
+    return orderedSmartLists.filter((smartList) => smartList.id !== settingsDragSession.itemId)
+  }, [orderedSmartLists, settingsDragSession])
+  const availableTags = useMemo(
+    () => Array.from(new Set(activeTasks.flatMap((task) => task.tagIds))).sort(),
+    [activeTasks],
   )
+  const collectionTreeNodes = useMemo(
+    () =>
+      orderedTaskCollections.map((collection) => ({
+        id: collection.id,
+        name: collection.displayName,
+        parentId: metadataDoc?.collectionParents[collection.id],
+      })),
+    [metadataDoc?.collectionParents, orderedTaskCollections],
+  )
+  const collectionTreeOptions = useMemo(
+    () => buildTreeOptions(collectionTreeNodes),
+    [collectionTreeNodes],
+  )
+
+  useEffect(() => {
+    if (!activeAccountId) {
+      return
+    }
+
+    const hasValidCollectionView =
+      activeView?.kind === 'collection' &&
+      orderedTaskCollections.some((collection) => collection.id === activeView.collectionId)
+    const hasValidSmartView =
+      activeView?.kind === 'smart' &&
+      orderedSmartLists.some((smartList) => smartList.id === activeView.smartListId)
+
+    if (hasValidCollectionView || hasValidSmartView) {
+      return
+    }
+
+    if (orderedTaskCollections[0]) {
+      setActiveView({ kind: 'collection', collectionId: orderedTaskCollections[0].id })
+      setCollectionViewScope('self-and-descendants')
+      return
+    }
+
+    if (orderedSmartLists[0]) {
+      setActiveView({ kind: 'smart', smartListId: orderedSmartLists[0].id })
+    }
+  }, [activeAccountId, activeView, orderedSmartLists, orderedTaskCollections])
 
   useEffect(() => {
     const selectedTask = snapshot.tasks.find(
@@ -434,23 +498,23 @@ function App() {
 
   const activeSmartList = useMemo(
     () =>
-      activeView.kind === 'smart'
-        ? activeSmartLists.find((entry) => entry.id === activeView.smartListId)
+      activeView?.kind === 'smart'
+        ? orderedSmartLists.find((entry) => entry.id === activeView.smartListId)
         : undefined,
-    [activeSmartLists, activeView],
+    [activeView, orderedSmartLists],
   )
   const currentTaskListOrdering = useMemo(
     () =>
-      activeView.kind === 'collection'
+      activeView?.kind === 'collection'
         ? normalizeOrdering(metadataDoc?.taskListOrderings[activeView.collectionId], defaultTaskListOrdering())
         : defaultTaskListOrdering(),
     [activeView, metadataDoc?.taskListOrderings],
   )
   const currentOrdering = useMemo(
     () =>
-      activeView.kind === 'smart'
+      activeView?.kind === 'smart'
         ? normalizeOrdering(activeSmartList?.ordering, defaultSmartListOrdering())
-        : activeView.kind === 'collection'
+        : activeView?.kind === 'collection'
           ? currentTaskListOrdering
           : {
               mode: 'property' as const,
@@ -459,20 +523,28 @@ function App() {
             },
     [activeSmartList?.ordering, activeView, currentTaskListOrdering],
   )
-  const canManualReorderTasks = activeView.kind === 'collection' && currentOrdering.mode === 'manual'
+  const canManualReorderTasks = activeView?.kind === 'collection' && currentOrdering.mode === 'manual'
 
   const visibleTasks = useMemo(() => {
     let tasks = activeTasks
 
-    if (activeView.kind === 'collection') {
-      tasks = tasks.filter((task) => task.collectionId === activeView.collectionId)
+    if (activeView?.kind === 'collection') {
+      const allowedCollectionIds =
+        collectionViewScope === 'self-and-descendants'
+          ? expandTreeIds(
+              [activeView.collectionId],
+              taskCollections.map((collection) => ({
+                id: collection.id,
+                parentId: metadataDoc?.collectionParents[collection.id],
+              })),
+            )
+          : new Set([activeView.collectionId])
+      tasks = tasks.filter((task) => allowedCollectionIds.has(task.collectionId))
     }
 
-    if (activeView.kind === 'smart') {
+    if (activeView?.kind === 'smart') {
       if (activeSmartList && metadataDoc) {
-        tasks = tasks.filter((task) =>
-          taskMatchesFilter(task, activeSmartList.filter, metadataDoc, taskCollections),
-        )
+        tasks = tasks.filter((task) => taskMatchesSmartList(task, activeSmartList, metadataDoc, taskCollections))
       }
     }
 
@@ -482,12 +554,12 @@ function App() {
     }
 
     const manualTaskIds =
-      activeView.kind === 'collection' && currentOrdering.mode === 'manual'
+      activeView?.kind === 'collection' && currentOrdering.mode === 'manual'
         ? metadataDoc?.manualTaskOrder[activeView.collectionId] ?? []
         : []
 
     return sortTasks(tasks, currentOrdering, manualTaskIds)
-  }, [activeSmartList, activeTasks, activeView, currentOrdering, deferredSearch, metadataDoc, taskCollections])
+  }, [activeSmartList, activeTasks, activeView, collectionViewScope, currentOrdering, deferredSearch, metadataDoc, taskCollections])
   const openVisibleTasks = useMemo(
     () => visibleTasks.filter((task) => task.status !== 'completed'),
     [visibleTasks],
@@ -505,80 +577,59 @@ function App() {
   }, [canManualReorderTasks, dragSession, openVisibleTasks])
   const renderedCompletedTasks = completedVisibleTasks
   const draggedTask = dragSession ? visibleTasks.find((task) => task.id === dragSession.taskId) : undefined
+  const draggedSettingsCollection =
+    settingsDragSession?.kind === 'collection'
+      ? orderedTaskCollections.find((collection) => collection.id === settingsDragSession.itemId)
+      : undefined
+  const draggedSettingsSmartList =
+    settingsDragSession?.kind === 'smart'
+      ? orderedSmartLists.find((smartList) => smartList.id === settingsDragSession.itemId)
+      : undefined
 
-  const folderNameById = new Map((metadataDoc?.folderNodes ?? []).map((entry) => [entry.id, entry.name]))
-  const tagNameById = new Map((metadataDoc?.tagNodes ?? []).map((entry) => [entry.id, entry.name]))
-
-  const folderSections = useMemo(() => {
-    const folders = metadataDoc?.folderNodes ?? []
-    const rootFolders = folders.filter((folder) => !folder.parentId)
-    const folderChildren = new Map<string, typeof folders>()
-    folders.forEach((folder) => {
-      if (!folder.parentId) {
+  const collectionSections = useMemo(() => {
+    const roots = collectionTreeNodes.filter((collection) => !collection.parentId)
+    const children = new Map<string, typeof collectionTreeNodes>()
+    collectionTreeNodes.forEach((collection) => {
+      if (!collection.parentId) {
         return
       }
-
-      const entries = folderChildren.get(folder.parentId) ?? []
-      entries.push(folder)
-      folderChildren.set(folder.parentId, entries)
-    })
-
-    const collectionsByFolder = new Map<string, typeof orderedTaskCollections>()
-    const unfiled: typeof orderedTaskCollections = []
-    orderedTaskCollections.forEach((collection) => {
-      const folderId = metadataDoc?.collectionFolders[collection.id]
-      if (!folderId) {
-        unfiled.push(collection)
-        return
-      }
-
-      const entries = collectionsByFolder.get(folderId) ?? []
+      const entries = children.get(collection.parentId) ?? []
       entries.push(collection)
-      collectionsByFolder.set(folderId, entries)
+      children.set(collection.parentId, entries)
     })
-
     return {
-      rootFolders,
-      folderChildren,
-      collectionsByFolder,
-      unfiled,
+      roots,
+      children,
     }
-  }, [metadataDoc, orderedTaskCollections])
+  }, [collectionTreeNodes])
   const orderedCollectionOptions = useMemo(() => {
     const options: Array<{ id: string; label: string }> = []
 
-    function appendFolder(folderId: string, depth: number) {
-      const directCollections = folderSections.collectionsByFolder.get(folderId) ?? []
-      const childFolders = folderSections.folderChildren.get(folderId) ?? []
-
-      directCollections.forEach((collection) => {
-        options.push({
-          id: collection.id,
-          label: `${'↳ '.repeat(depth + 1)}${collection.displayName}`,
-        })
-      })
-
-      childFolders.forEach((childFolder) => appendFolder(childFolder.id, depth + 1))
-    }
-
-    folderSections.unfiled.forEach((collection) => {
+    function appendCollection(collectionId: string, depth: number) {
+      const collection = orderedTaskCollections.find((entry) => entry.id === collectionId)
+      if (!collection) {
+        return
+      }
       options.push({
         id: collection.id,
-        label: collection.displayName,
+        label: `${'↳ '.repeat(depth)}${collection.displayName}`,
       })
-    })
+      ;(collectionSections.children.get(collectionId) ?? []).forEach((childCollection) =>
+        appendCollection(childCollection.id, depth + 1),
+      )
+    }
 
-    folderSections.rootFolders.forEach((folder) => appendFolder(folder.id, 0))
+    collectionSections.roots.forEach((collection) => appendCollection(collection.id, 0))
 
     return options
-  }, [folderSections])
+  }, [collectionSections, orderedTaskCollections])
 
   const currentViewTitle =
-    activeView.kind === 'all'
-      ? 'Today'
-      : activeView.kind === 'collection'
-        ? taskCollections.find((collection) => collection.id === activeView.collectionId)?.displayName ?? 'Task list'
-        : activeSmartLists.find((smartList) => smartList.id === activeView.smartListId)?.name ?? 'Smart list'
+    activeView?.kind === 'collection'
+      ? taskCollections.find((collection) => collection.id === activeView.collectionId)?.displayName ?? 'Task list'
+      : activeView?.kind === 'smart'
+        ? orderedSmartLists.find((smartList) => smartList.id === activeView.smartListId)?.name ?? 'Smart list'
+        : orderedTaskCollections[0]?.displayName ?? orderedSmartLists[0]?.name ?? 'Tasks'
 
   function replaceSnapshot(nextSnapshot: AppSnapshot) {
     startTransition(() => setSnapshot(nextSnapshot))
@@ -631,7 +682,7 @@ function App() {
   }
 
   function handleTaskDragStart(event: React.PointerEvent<HTMLSpanElement>, task: TaskItem) {
-    if (!canManualReorderTasks || task.status === 'completed' || activeView.kind !== 'collection') {
+    if (!canManualReorderTasks || task.status === 'completed' || activeView?.kind !== 'collection') {
       return
     }
 
@@ -644,6 +695,32 @@ function App() {
 
     setPendingTaskPress({
       taskId: task.id,
+      pointerX: event.clientX,
+      pointerY: event.clientY,
+      offsetX: event.clientX - rect.left,
+      offsetY: event.clientY - rect.top,
+      width: rect.width,
+      height: rect.height,
+    })
+  }
+
+  function handleSettingsDragStart(
+    event: React.PointerEvent<HTMLSpanElement>,
+    kind: 'collection' | 'smart',
+    itemId: string,
+    parentId?: string,
+  ) {
+    const row = settingsRowsRef.current.get(settingsRowKey(kind, itemId))
+    if (!row) {
+      return
+    }
+
+    const rect = row.getBoundingClientRect()
+
+    setPendingSettingsPress({
+      kind,
+      itemId,
+      parentId,
       pointerX: event.clientX,
       pointerY: event.clientY,
       offsetX: event.clientX - rect.left,
@@ -699,6 +776,53 @@ function App() {
     }
   }, [pendingTaskPress])
 
+  useEffect(() => {
+    if (!pendingSettingsPress) {
+      return
+    }
+
+    const press = pendingSettingsPress
+
+    function clearPendingSettingsPress() {
+      setPendingSettingsPress(undefined)
+    }
+
+    function handlePointerMove(event: PointerEvent) {
+      const deltaX = event.clientX - press.pointerX
+      const deltaY = event.clientY - press.pointerY
+      if (Math.hypot(deltaX, deltaY) < 6) {
+        return
+      }
+
+      setSettingsDragSession({
+        kind: press.kind,
+        itemId: press.itemId,
+        parentId: press.parentId,
+        pointerX: event.clientX,
+        pointerY: event.clientY,
+        offsetX: press.offsetX,
+        offsetY: press.offsetY,
+        width: press.width,
+        height: press.height,
+      })
+      clearPendingSettingsPress()
+    }
+
+    function handlePointerEnd() {
+      clearPendingSettingsPress()
+    }
+
+    window.addEventListener('pointermove', handlePointerMove)
+    window.addEventListener('pointerup', handlePointerEnd)
+    window.addEventListener('pointercancel', handlePointerEnd)
+
+    return () => {
+      window.removeEventListener('pointermove', handlePointerMove)
+      window.removeEventListener('pointerup', handlePointerEnd)
+      window.removeEventListener('pointercancel', handlePointerEnd)
+    }
+  }, [pendingSettingsPress])
+
   const recordSyncIssue = useCallback(
     (source: string, failure: string, accountId = activeAccountId) => {
       const nextEntry: SyncLogEntry = {
@@ -717,9 +841,9 @@ function App() {
     [activeAccountId],
   )
 
-  function toggleFolderCollapsed(folderId: string) {
-    setCollapsedFolders((current) =>
-      current.includes(folderId) ? current.filter((id) => id !== folderId) : [...current, folderId],
+  function toggleCollectionCollapsed(collectionId: string) {
+    setCollapsedCollections((current) =>
+      current.includes(collectionId) ? current.filter((id) => id !== collectionId) : [...current, collectionId],
     )
   }
 
@@ -832,7 +956,7 @@ function App() {
         metadataDocs: [...snapshot.metadataDocs, createDefaultMetadata(accountId)],
       })
       setActiveAccountId(accountId)
-      setActiveView({ kind: 'all' })
+      setActiveView(undefined)
       setConnectionForm(emptyConnection)
 
       await handleSyncAccount(account, discovery.collections, true)
@@ -923,7 +1047,7 @@ function App() {
       completedAt: taskDraft.status === 'completed' ? taskDraft.completedAt ?? now : undefined,
       createdAt: snapshot.tasks.find((task) => task.id === taskDraft.id)?.createdAt ?? now,
       updatedAt: now,
-      tagIds: taskDraft.tagIds,
+      tagIds: extractHashtags(taskDraft.title.trim(), taskDraft.notes.trim()),
       syncState: 'syncing',
       url: taskDraft.url,
       etag: taskDraft.etag,
@@ -936,7 +1060,7 @@ function App() {
         ...current,
         tasks: [...current.tasks.filter((task) => task.id !== nextTask.id), nextTask],
       }))
-      const remote = await upsertTaskRemote(activeAccount, targetCollection, nextTask, metadataDoc)
+      const remote = await upsertTaskRemote(activeAccount, targetCollection, nextTask)
       replaceSnapshotWith((current) => ({
         ...current,
         tasks: [
@@ -1001,7 +1125,7 @@ function App() {
     })
 
     try {
-      const remote = await upsertTaskRemote(activeAccount, targetCollection, updatedTask, metadataDoc)
+      const remote = await upsertTaskRemote(activeAccount, targetCollection, updatedTask)
       replaceSnapshot({
         ...snapshot,
         tasks: [
@@ -1163,7 +1287,7 @@ function App() {
         commit &&
         currentDragSession &&
         metadataDoc &&
-        activeView.kind === 'collection' &&
+        activeView?.kind === 'collection' &&
         isManualOrderingEnabled(activeView.collectionId)
       ) {
         const collectionId = activeView.collectionId
@@ -1211,118 +1335,156 @@ function App() {
     }
   }, [activeView, canManualReorderTasks, dragSession, dropIndex, isManualOrderingEnabled, metadataDoc, renderedOpenTasks, saveMetadata, visibleTasks])
 
-  async function handleAddFolder() {
-    if (!metadataDoc || !activeAccountId || !folderDraft.name.trim()) {
+  useEffect(() => {
+    const activeSettingsDrag = settingsDragSession
+    const currentMetadataDoc = metadataDoc
+
+    if (!activeSettingsDrag || !currentMetadataDoc) {
       return
     }
 
-    await saveMetadata(
-      {
-        ...metadataDoc,
-        folderNodes: [
-          ...metadataDoc.folderNodes,
-          {
-            id: newId(),
-            accountId: activeAccountId,
-            name: folderDraft.name.trim(),
-            parentId: folderDraft.parentId || undefined,
-          },
-        ],
-        updatedAt: new Date().toISOString(),
-      },
-      'Folder saved.',
-    )
-    setFolderDraft({ name: '', parentId: '' })
-  }
+    const drag = activeSettingsDrag
+    const metadata = currentMetadataDoc
 
-  async function handleAddTag() {
-    if (!metadataDoc || !activeAccountId || !tagDraft.name.trim()) {
-      return
+    function renderedIdsForSession(session: SettingsDragSession): string[] {
+      if (session.kind === 'smart') {
+        return renderedSmartLists.map((smartList) => smartList.id)
+      }
+
+      return orderedCollectionIds.filter(
+        (collectionId) =>
+          metadata.collectionParents[collectionId] === session.parentId && collectionId !== session.itemId,
+      )
     }
 
-    await saveMetadata(
-      {
-        ...metadataDoc,
-        tagNodes: [
-          ...metadataDoc.tagNodes,
-          {
-            id: newId(),
-            accountId: activeAccountId,
-            name: tagDraft.name.trim(),
-            parentId: tagDraft.parentId || undefined,
-          },
-        ],
-        updatedAt: new Date().toISOString(),
-      },
-      'Tag saved.',
-    )
-    setTagDraft({ name: '', parentId: '' })
-  }
+    function updateSettingsDropIndex(pointerY: number) {
+      const renderedIds = renderedIdsForSession(drag)
+      if (renderedIds.length === 0) {
+        setSettingsDropIndex(0)
+        return
+      }
 
-  async function handleAssignCollectionFolder(collectionId: string, folderId?: string) {
+      for (let index = 0; index < renderedIds.length; index += 1) {
+        const element = settingsRowsRef.current.get(settingsRowKey(drag.kind, renderedIds[index]))
+        if (!element) {
+          continue
+        }
+
+        const rect = element.getBoundingClientRect()
+        if (pointerY < rect.top + rect.height / 2) {
+          setSettingsDropIndex(index)
+          return
+        }
+      }
+
+      setSettingsDropIndex(renderedIds.length)
+    }
+
+    function handlePointerMove(event: PointerEvent) {
+      setSettingsDragSession((current) =>
+        current
+          ? {
+              ...current,
+              pointerX: event.clientX,
+              pointerY: event.clientY,
+            }
+          : current,
+      )
+      updateSettingsDropIndex(event.clientY)
+    }
+
+    function finishSettingsDrag(commit: boolean) {
+      const session = drag
+      const currentDropIndex = settingsDropIndex ?? renderedIdsForSession(drag).length
+      setSettingsDragSession(undefined)
+      setSettingsDropIndex(undefined)
+
+      if (!commit) {
+        return
+      }
+
+      if (session.kind === 'smart') {
+        void saveMetadata(
+          {
+            ...metadata,
+            smartListOrder: moveIdToIndex(orderedSmartListIds, session.itemId, currentDropIndex),
+            updatedAt: new Date().toISOString(),
+          },
+          'Smart list order updated.',
+        )
+        return
+      }
+
+      void saveMetadata(
+        {
+          ...metadata,
+          collectionOrder: moveCollectionIdWithinParent(
+            orderedCollectionIds,
+            metadata.collectionParents,
+            session.itemId,
+            currentDropIndex,
+          ),
+          updatedAt: new Date().toISOString(),
+        },
+        'Task list order updated.',
+      )
+    }
+
+    function handlePointerUp() {
+      finishSettingsDrag(true)
+    }
+
+    function handleKeyDown(event: KeyboardEvent) {
+      if (event.key === 'Escape') {
+        finishSettingsDrag(false)
+      }
+    }
+
+    window.addEventListener('pointermove', handlePointerMove)
+    window.addEventListener('pointerup', handlePointerUp)
+    window.addEventListener('keydown', handleKeyDown)
+    document.body.classList.add('drag-active')
+    updateSettingsDropIndex(drag.pointerY)
+
+    return () => {
+      window.removeEventListener('pointermove', handlePointerMove)
+      window.removeEventListener('pointerup', handlePointerUp)
+      window.removeEventListener('keydown', handleKeyDown)
+      document.body.classList.remove('drag-active')
+    }
+  }, [metadataDoc, orderedCollectionIds, orderedSmartListIds, renderedSmartLists, saveMetadata, settingsDragSession, settingsDropIndex])
+
+  async function handleAssignCollectionParent(collectionId: string, parentId?: string) {
     if (!metadataDoc) {
       return
     }
 
+    if (parentId) {
+      const descendantIds = expandTreeIds(
+        [collectionId],
+        taskCollections.map((collection) => ({
+          id: collection.id,
+          parentId: metadataDoc.collectionParents[collection.id],
+        })),
+      )
+      if (descendantIds.has(parentId)) {
+        setMessage('A list cannot be nested inside itself or one of its sublists.')
+        return
+      }
+    }
+
     await saveMetadata(
       {
         ...metadataDoc,
-        collectionFolders: {
-          ...metadataDoc.collectionFolders,
-          [collectionId]: folderId || undefined,
+        collectionParents: {
+          ...metadataDoc.collectionParents,
+          [collectionId]: parentId || undefined,
         },
         collectionOrder: [...metadataDoc.collectionOrder],
         updatedAt: new Date().toISOString(),
       },
-      'List moved.',
+      'List hierarchy updated.',
     )
-  }
-
-  async function handleReorderFolder(folderId: string, direction: 'up' | 'down') {
-    if (!metadataDoc) {
-      return
-    }
-
-    const nextMetadataDoc: MetadataDocument = {
-      ...metadataDoc,
-      folderNodes: reorderSiblingNodes(metadataDoc.folderNodes, folderId, direction),
-      updatedAt: new Date().toISOString(),
-    }
-
-    await saveMetadata(nextMetadataDoc, 'Folder order updated.')
-  }
-
-  async function handleReorderTag(tagId: string, direction: 'up' | 'down') {
-    if (!metadataDoc) {
-      return
-    }
-
-    const nextMetadataDoc: MetadataDocument = {
-      ...metadataDoc,
-      tagNodes: reorderSiblingNodes(metadataDoc.tagNodes, tagId, direction),
-      updatedAt: new Date().toISOString(),
-    }
-
-    await saveMetadata(nextMetadataDoc, 'Tag order updated.')
-  }
-
-  async function handleReorderTaskList(collectionId: string, direction: 'up' | 'down') {
-    if (!metadataDoc) {
-      return
-    }
-
-    const nextMetadataDoc: MetadataDocument = {
-      ...metadataDoc,
-      collectionOrder: reorderCollectionIdsWithinFolder(
-        orderedCollectionIds,
-        metadataDoc.collectionFolders,
-        collectionId,
-        direction,
-      ),
-      updatedAt: new Date().toISOString(),
-    }
-
-    await saveMetadata(nextMetadataDoc, 'Task list order updated.')
   }
 
   async function handleDeleteTaskList(collectionId: string) {
@@ -1344,8 +1506,13 @@ function App() {
       let nextMetadataDoc = metadataDoc
         ? {
             ...metadataDoc,
-            collectionFolders: Object.fromEntries(
-              Object.entries(metadataDoc.collectionFolders).filter(([key]) => key !== collectionId),
+            collectionParents: Object.fromEntries(
+              Object.entries(metadataDoc.collectionParents).flatMap(([key, parentId]) => {
+                if (key === collectionId) {
+                  return []
+                }
+                return [[key, parentId === collectionId ? undefined : parentId]]
+              }),
             ),
             collectionOrder: metadataDoc.collectionOrder.filter((id) => id !== collectionId),
             taskListOrderings: Object.fromEntries(
@@ -1376,8 +1543,8 @@ function App() {
           : current.metadataDocs,
       }))
 
-      if (activeView.kind === 'collection' && activeView.collectionId === collectionId) {
-        setActiveView({ kind: 'all' })
+      if (activeView?.kind === 'collection' && activeView.collectionId === collectionId) {
+        setActiveView(undefined)
       }
       if (taskDraft.collectionId === collectionId || selectedTaskId) {
         closeEditor()
@@ -1391,39 +1558,6 @@ function App() {
     } finally {
       setBusy(false)
     }
-  }
-
-  async function handleDeleteFolder(folderId: string) {
-    if (!metadataDoc) {
-      return
-    }
-
-    const descendantIds = new Set<string>([folderId])
-    let changed = true
-    while (changed) {
-      changed = false
-      metadataDoc.folderNodes.forEach((folder) => {
-        if (folder.parentId && descendantIds.has(folder.parentId) && !descendantIds.has(folder.id)) {
-          descendantIds.add(folder.id)
-          changed = true
-        }
-      })
-    }
-
-    const nextMetadataDoc: MetadataDocument = {
-      ...metadataDoc,
-      folderNodes: metadataDoc.folderNodes.filter((folder) => !descendantIds.has(folder.id)),
-      collectionFolders: Object.fromEntries(
-        Object.entries(metadataDoc.collectionFolders).map(([collectionId, mappedFolderId]) => [
-          collectionId,
-          mappedFolderId && descendantIds.has(mappedFolderId) ? undefined : mappedFolderId,
-        ]),
-      ),
-      updatedAt: new Date().toISOString(),
-    }
-
-    setCollapsedFolders((current) => current.filter((id) => !descendantIds.has(id)))
-    await saveMetadata(nextMetadataDoc, 'Folder deleted.')
   }
 
   async function handleCreateTaskList() {
@@ -1442,13 +1576,13 @@ function App() {
         collections: [...snapshot.collections, newCollection],
       })
 
-      if (metadataDoc && listDraft.folderId) {
+      if (metadataDoc && listDraft.parentId) {
         await saveMetadata(
           {
             ...metadataDoc,
-            collectionFolders: {
-              ...metadataDoc.collectionFolders,
-              [newCollection.id]: listDraft.folderId,
+            collectionParents: {
+              ...metadataDoc.collectionParents,
+              [newCollection.id]: listDraft.parentId,
             },
             updatedAt: new Date().toISOString(),
           },
@@ -1458,7 +1592,7 @@ function App() {
         setMessage('Task list created.')
       }
 
-      setListDraft({ name: '', folderId: '' })
+      setListDraft({ name: '', parentId: '' })
     } catch (error) {
       const failure = error instanceof Error ? error.message : 'Task list creation failed.'
       recordSyncIssue('Task list creation', failure, activeAccount.id)
@@ -1473,11 +1607,18 @@ function App() {
       return
     }
 
+    const definitionError = validateSmartListDefinition(smartDraftDefinition)
+    if (definitionError) {
+      setMessage(definitionError)
+      return
+    }
+
     const nextSmartList: SmartList = {
       id: smartDraftId ?? newId(),
       accountId: activeAccount.id,
+      definition: smartDraftDefinition.trim(),
       name: smartDraftName.trim(),
-      filter: smartDraftFilter,
+      filter: defaultFilter(),
       ordering: normalizeOrdering(smartDraftOrdering, defaultSmartListOrdering()),
       syncState: 'syncing',
       updatedAt: new Date().toISOString(),
@@ -1489,7 +1630,7 @@ function App() {
     })
 
     try {
-      const remote = await upsertSmartListRemote(activeAccount, smartCollection, nextSmartList, metadataDoc)
+      const remote = await upsertSmartListRemote(activeAccount, smartCollection, nextSmartList)
       replaceSnapshot({
         ...snapshot,
         smartLists: [
@@ -1497,10 +1638,22 @@ function App() {
           { ...nextSmartList, url: remote.url, etag: remote.etag, syncState: 'synced' },
         ],
       })
-      setMessage('Smart list saved.')
+      const needsOrderUpdate = !metadataDoc.smartListOrder.includes(nextSmartList.id)
+      if (needsOrderUpdate) {
+        await saveMetadata(
+          {
+            ...metadataDoc,
+            smartListOrder: [...orderedSmartListIds, nextSmartList.id],
+            updatedAt: new Date().toISOString(),
+          },
+          'Smart list saved.',
+        )
+      } else {
+        setMessage('Smart list saved.')
+      }
       setSmartDraftId(undefined)
       setSmartDraftName('')
-      setSmartDraftFilter(defaultFilter())
+      setSmartDraftDefinition('')
       setSmartDraftOrdering(defaultSmartListOrdering())
       setIsSmartEditorOpen(false)
     } catch (error) {
@@ -1522,7 +1675,21 @@ function App() {
 
     try {
       await deleteSmartListRemote(activeAccount, smartList)
-      setMessage('Smart list deleted.')
+      if (metadataDoc && metadataDoc.smartListOrder.includes(smartList.id)) {
+        await saveMetadata(
+          {
+            ...metadataDoc,
+            smartListOrder: metadataDoc.smartListOrder.filter((id) => id !== smartList.id),
+            updatedAt: new Date().toISOString(),
+          },
+          'Smart list deleted.',
+        )
+      } else {
+        setMessage('Smart list deleted.')
+      }
+      if (activeView?.kind === 'smart' && activeView.smartListId === smartList.id) {
+        setActiveView(undefined)
+      }
     } catch (error) {
       const failure = error instanceof Error ? error.message : 'Smart list delete failed.'
       recordSyncIssue('Smart list delete', failure, activeAccount.id)
@@ -1558,20 +1725,18 @@ function App() {
 
       replaceSnapshot(emptySnapshot)
       setActiveAccountId(undefined)
-      setActiveView({ kind: 'all' })
+      setActiveView(undefined)
       setSelectedTaskId(undefined)
       setTaskDraft(createDraft())
       setIsCreatingTask(false)
       setSmartDraftId(undefined)
       setSmartDraftName('')
-      setSmartDraftFilter(defaultFilter())
+      setSmartDraftDefinition('')
       setSearchText('')
       setQuickAddTitle('')
-      setCollapsedFolders([])
+      setCollapsedCollections([])
       setConnectionForm(emptyConnection)
-      setFolderDraft({ name: '', parentId: '' })
-      setTagDraft({ name: '', parentId: '' })
-      setListDraft({ name: '', folderId: '' })
+      setListDraft({ name: '', parentId: '' })
       setWorkspaceMode('settings')
       setSettingsSection('accounts')
       setMessage('Local cache cleared. Reconnect an account to sync again.')
@@ -1603,8 +1768,8 @@ function App() {
       title: quickAddTitle.trim(),
       notes: '',
       status: 'needs-action',
-      priority: 1,
-      tagIds: [],
+      priority: 0,
+      tagIds: extractHashtags(quickAddTitle.trim()),
       createdAt: now,
       updatedAt: now,
       syncState: 'syncing',
@@ -1618,7 +1783,7 @@ function App() {
         ...current,
         tasks: [...current.tasks.filter((task) => task.id !== nextTask.id), nextTask],
       }))
-      const remote = await upsertTaskRemote(activeAccount, targetCollection, nextTask, metadataDoc)
+      const remote = await upsertTaskRemote(activeAccount, targetCollection, nextTask)
       replaceSnapshotWith((current) => ({
         ...current,
         tasks: [
@@ -1657,51 +1822,58 @@ function App() {
   function editSmartList(smartList: SmartList) {
     setSmartDraftId(smartList.id)
     setSmartDraftName(smartList.name)
-    setSmartDraftFilter(smartList.filter)
+    setSmartDraftDefinition(smartList.definition)
     setSmartDraftOrdering(normalizeOrdering(smartList.ordering, defaultSmartListOrdering()))
     setIsSmartEditorOpen(true)
   }
 
-  function renderFolderTree(folderId: string, depth = 0): React.JSX.Element | null {
-    const folder = (metadataDoc?.folderNodes ?? []).find((entry) => entry.id === folderId)
-    if (!folder) {
+  function renderCollectionTree(collectionId: string, depth = 0): React.JSX.Element | null {
+    const collection = orderedTaskCollections.find((entry) => entry.id === collectionId)
+    if (!collection) {
       return null
     }
 
-    const isCollapsed = collapsedFolders.includes(folder.id)
-    const directCollections = folderSections.collectionsByFolder.get(folder.id) ?? []
-    const childFolders = folderSections.folderChildren.get(folder.id) ?? []
+    const childCollections = collectionSections.children.get(collection.id) ?? []
+    const hasChildren = childCollections.length > 0
+    const isCollapsed = collapsedCollections.includes(collection.id)
+    const descendantIds = expandTreeIds(
+      [collection.id],
+      taskCollections.map((entry) => ({
+        id: entry.id,
+        parentId: metadataDoc?.collectionParents[entry.id],
+      })),
+    )
+    const taskCount = activeTasks.filter((task) => descendantIds.has(task.collectionId)).length
 
     return (
-      <div key={folder.id} className="sidebar-folder">
-        <button
-          className={`sidebar-folder-toggle depth-${Math.min(depth, 3)}`}
-          onClick={() => toggleFolderCollapsed(folder.id)}
-        >
-          <span>{isCollapsed ? '>' : 'v'}</span>
-          <strong>{folder.name}</strong>
-        </button>
+      <div key={collection.id} className="sidebar-folder">
+        <div className={`sidebar-folder-toggle depth-${Math.min(depth, 3)} ${hasChildren ? 'has-children' : ''}`}>
+          {hasChildren ? (
+            <button className="ghost-icon small" onClick={() => toggleCollectionCollapsed(collection.id)}>
+              {isCollapsed ? '>' : 'v'}
+            </button>
+          ) : (
+            <span className="sidebar-tree-spacer" />
+          )}
+          <button
+            className={`sidebar-link nested ${
+              activeView?.kind === 'collection' && activeView.collectionId === collection.id ? 'active' : ''
+            }`}
+            onClick={() => {
+              setActiveView({ kind: 'collection', collectionId: collection.id })
+              setCollectionViewScope('self-and-descendants')
+              setIsSidebarOpen(false)
+            }}
+          >
+            <span>{collection.displayName}</span>
+            <strong>{taskCount}</strong>
+          </button>
+        </div>
 
-        {!isCollapsed && (
-          <>
-            {directCollections.map((collection) => (
-              <button
-                key={collection.id}
-                className={`sidebar-link nested depth-${Math.min(depth, 3)} ${
-                  activeView.kind === 'collection' && activeView.collectionId === collection.id ? 'active' : ''
-                }`}
-                onClick={() => {
-                  setActiveView({ kind: 'collection', collectionId: collection.id })
-                  setIsSidebarOpen(false)
-                }}
-              >
-                <span>{collection.displayName}</span>
-                <strong>{activeTasks.filter((task) => task.collectionId === collection.id).length}</strong>
-              </button>
-            ))}
-            {childFolders.map((childFolder) => renderFolderTree(childFolder.id, depth + 1))}
-          </>
-        )}
+        {!isCollapsed &&
+          childCollections.map((childCollection) =>
+            renderCollectionTree(childCollection.id, depth + 1),
+          )}
       </div>
     )
   }
@@ -1710,112 +1882,135 @@ function App() {
     const ordering = normalizeOrdering(metadataDoc?.taskListOrderings[collection.id], defaultTaskListOrdering())
 
     return (
-      <div key={collection.id} className={`assign-row structure-row depth-${Math.min(depth, 3)}`}>
-        <span>{collection.displayName}</span>
-        <div className="assign-actions">
-          <select
-            value={metadataDoc?.collectionFolders[collection.id] ?? ''}
-            onChange={(event) =>
-              void handleAssignCollectionFolder(collection.id, event.target.value || undefined)
+      <div key={collection.id} className="structure-branch">
+        <div
+          ref={(element) => {
+            const key = settingsRowKey('collection', collection.id)
+            if (element) {
+              settingsRowsRef.current.set(key, element)
+            } else {
+              settingsRowsRef.current.delete(key)
             }
-          >
-            <option value="">Unfiled</option>
-            {folderTreeOptions.map((folderOption) => (
-              <option key={folderOption.id} value={folderOption.id}>
-                {folderOption.label}
-              </option>
-            ))}
-          </select>
-          <select
-            value={ordering.mode}
-            onChange={(event) =>
-              void handleUpdateTaskListOrdering(collection.id, {
-                mode: event.target.value as TaskOrdering['mode'],
-              })
-            }
-          >
-            <option value="manual">Manual</option>
-            <option value="property">Property</option>
-          </select>
-          {ordering.mode === 'property' && (
-            <>
-              <select
-                value={ordering.field}
-                onChange={(event) =>
-                  void handleUpdateTaskListOrdering(collection.id, {
-                    field: event.target.value as TaskOrderField,
-                  })
-                }
-              >
-                {orderingFields.map((field) => (
-                  <option key={field.value} value={field.value}>
-                    {field.label}
+          }}
+          className={`assign-row structure-row depth-${Math.min(depth, 3)} ${
+            settingsDragSession?.kind === 'collection' && settingsDragSession.itemId === collection.id ? 'drag-source-hidden' : ''
+          }`}
+        >
+          <div className="settings-row-title">
+            <span
+              className="task-drag-handle settings-drag-handle"
+              onPointerDown={(event) =>
+                handleSettingsDragStart(event, 'collection', collection.id, metadataDoc?.collectionParents[collection.id])
+              }
+            >
+              ::
+            </span>
+            <span>{collection.displayName}</span>
+          </div>
+          <div className="assign-actions">
+            <select
+              value={metadataDoc?.collectionParents[collection.id] ?? ''}
+              onChange={(event) =>
+                void handleAssignCollectionParent(collection.id, event.target.value || undefined)
+              }
+            >
+              <option value="">Root</option>
+              {collectionTreeOptions
+                .filter((option) => {
+                  if (option.id === collection.id) {
+                    return false
+                  }
+                  const descendantIds = expandTreeIds(
+                    [collection.id],
+                    taskCollections.map((entry) => ({
+                      id: entry.id,
+                      parentId: metadataDoc?.collectionParents[entry.id],
+                    })),
+                  )
+                  return !descendantIds.has(option.id)
+                })
+                .map((option) => (
+                  <option key={option.id} value={option.id}>
+                    {option.label}
                   </option>
                 ))}
-              </select>
-              <select
-                value={ordering.direction}
-                onChange={(event) =>
-                  void handleUpdateTaskListOrdering(collection.id, {
-                    direction: event.target.value as SortDirection,
-                  })
-                }
-              >
-                {sortDirections.map((direction) => (
-                  <option key={direction.value} value={direction.value}>
-                    {direction.label}
-                  </option>
-                ))}
-              </select>
-            </>
-          )}
-          <button className="ghost-button" onClick={() => void handleReorderTaskList(collection.id, 'up')}>
-            Up
-          </button>
-          <button className="ghost-button" onClick={() => void handleReorderTaskList(collection.id, 'down')}>
-            Down
-          </button>
-          <button className="ghost-button danger" onClick={() => void handleDeleteTaskList(collection.id)}>
-            Delete
-          </button>
+            </select>
+            <select
+              value={ordering.mode}
+              onChange={(event) =>
+                void handleUpdateTaskListOrdering(collection.id, {
+                  mode: event.target.value as TaskOrdering['mode'],
+                })
+              }
+            >
+              <option value="manual">Manual</option>
+              <option value="property">Property</option>
+            </select>
+            {ordering.mode === 'property' && (
+              <>
+                <select
+                  value={ordering.field}
+                  onChange={(event) =>
+                    void handleUpdateTaskListOrdering(collection.id, {
+                      field: event.target.value as TaskOrderField,
+                    })
+                  }
+                >
+                  {orderingFields.map((field) => (
+                    <option key={field.value} value={field.value}>
+                      {field.label}
+                    </option>
+                  ))}
+                </select>
+                <select
+                  value={ordering.direction}
+                  onChange={(event) =>
+                    void handleUpdateTaskListOrdering(collection.id, {
+                      direction: event.target.value as SortDirection,
+                    })
+                  }
+                >
+                  {sortDirections.map((direction) => (
+                    <option key={direction.value} value={direction.value}>
+                      {direction.label}
+                    </option>
+                  ))}
+                </select>
+              </>
+            )}
+            <button className="ghost-button danger" onClick={() => void handleDeleteTaskList(collection.id)}>
+              Delete
+            </button>
+          </div>
         </div>
       </div>
     )
   }
 
-  function renderSettingsFolderTree(folderId: string, depth = 0): React.JSX.Element | null {
-    const folder = (metadataDoc?.folderNodes ?? []).find((entry) => entry.id === folderId)
-    if (!folder) {
-      return null
-    }
+  function renderSettingsCollectionList(parentId: string | undefined, depth: number) {
+    const childCollections = (parentId ? collectionSections.children.get(parentId) ?? [] : collectionSections.roots)
+      .map((collection) => orderedTaskCollections.find((entry) => entry.id === collection.id))
+      .filter((collection): collection is (typeof orderedTaskCollections)[number] => Boolean(collection))
 
-    const directCollections = folderSections.collectionsByFolder.get(folder.id) ?? []
-    const childFolders = folderSections.folderChildren.get(folder.id) ?? []
+    const renderedCollections =
+      settingsDragSession?.kind === 'collection' && settingsDragSession.parentId === parentId
+        ? childCollections.filter((collection) => collection.id !== settingsDragSession.itemId)
+        : childCollections
 
     return (
-      <div key={folder.id} className="structure-branch">
-        <div className={`simple-row structure-row depth-${Math.min(depth, 3)}`}>
-          <div>
-            <strong>{folder.name}</strong>
-            <span>{folder.parentId ? `inside ${folderNameById.get(folder.parentId)}` : 'root'}</span>
+      <div className="structure-children">
+        {renderedCollections.map((collection, index) => (
+          <div key={collection.id}>
+            {settingsDragSession?.kind === 'collection' &&
+              settingsDragSession.parentId === parentId &&
+              settingsDropIndex === index && <div className="task-drop-slot settings-drop-slot" />}
+            {renderSettingsCollectionRow(collection, depth)}
+            {renderSettingsCollectionList(collection.id, depth + 1)}
           </div>
-          <div className="row-control-group">
-            <button className="ghost-button" onClick={() => void handleReorderFolder(folder.id, 'up')}>
-              Up
-            </button>
-            <button className="ghost-button" onClick={() => void handleReorderFolder(folder.id, 'down')}>
-              Down
-            </button>
-            <button className="ghost-button danger" onClick={() => void handleDeleteFolder(folder.id)}>
-              Delete
-            </button>
-          </div>
-        </div>
-
-        <div className="structure-children">
-          {directCollections.map((collection) => renderSettingsCollectionRow(collection, depth + 1))}
-          {childFolders.map((childFolder) => renderSettingsFolderTree(childFolder.id, depth + 1))}
-        </div>
+        ))}
+        {settingsDragSession?.kind === 'collection' &&
+          settingsDragSession.parentId === parentId &&
+          settingsDropIndex === renderedCollections.length && <div className="task-drop-slot settings-drop-slot" />}
       </div>
     )
   }
@@ -1854,7 +2049,7 @@ function App() {
                 onClick={() => {
                   setSmartDraftId(undefined)
                   setSmartDraftName('')
-                  setSmartDraftFilter(defaultFilter())
+                  setSmartDraftDefinition('')
                   setSmartDraftOrdering(defaultSmartListOrdering())
                   setIsSmartEditorOpen(true)
                 }}
@@ -1862,11 +2057,11 @@ function App() {
                 New
               </button>
             </div>
-            {activeSmartLists.map((smartList) => (
+            {orderedSmartLists.map((smartList) => (
               <div key={smartList.id} className="sidebar-smart-row">
                 <button
                   className={`sidebar-link ${
-                    activeView.kind === 'smart' && activeView.smartListId === smartList.id ? 'active' : ''
+                    activeView?.kind === 'smart' && activeView.smartListId === smartList.id ? 'active' : ''
                   }`}
                   onClick={() => {
                     setActiveView({ kind: 'smart', smartListId: smartList.id })
@@ -1891,23 +2086,7 @@ function App() {
               </button>
             </div>
 
-            {folderSections.unfiled.map((collection) => (
-              <button
-                key={collection.id}
-                className={`sidebar-link ${
-                  activeView.kind === 'collection' && activeView.collectionId === collection.id ? 'active' : ''
-                }`}
-                onClick={() => {
-                  setActiveView({ kind: 'collection', collectionId: collection.id })
-                  setIsSidebarOpen(false)
-                }}
-              >
-                <span>{collection.displayName}</span>
-                <strong>{activeTasks.filter((task) => task.collectionId === collection.id).length}</strong>
-              </button>
-            ))}
-
-            {folderSections.rootFolders.map((folder) => renderFolderTree(folder.id))}
+            {collectionSections.roots.map((collection) => renderCollectionTree(collection.id))}
           </div>
         </nav>
 
@@ -1960,7 +2139,7 @@ function App() {
                 onClick={() => {
                   setSmartDraftId(undefined)
                   setSmartDraftName('')
-                  setSmartDraftFilter(defaultFilter())
+                  setSmartDraftDefinition('')
                   setSmartDraftOrdering(defaultSmartListOrdering())
                   setIsSmartEditorOpen(true)
                 }}
@@ -1990,15 +2169,8 @@ function App() {
                   className={`settings-nav-button ${settingsSection === 'structure' ? 'active' : ''}`}
                   onClick={() => setSettingsSection('structure')}
                 >
-                  <strong>Folders and lists</strong>
-                  <span>Hierarchy and ordering</span>
-                </button>
-                <button
-                  className={`settings-nav-button ${settingsSection === 'tags' ? 'active' : ''}`}
-                  onClick={() => setSettingsSection('tags')}
-                >
-                  <strong>Tags</strong>
-                  <span>Nested tag structure</span>
+                  <strong>Lists</strong>
+                  <span>Nesting and ordering</span>
                 </button>
               </aside>
 
@@ -2007,7 +2179,7 @@ function App() {
                   <section className="settings-page-section">
                     <div className="settings-page-header">
                       <div>
-                        <p>Window 1 of 3</p>
+                        <p>Window 1 of 2</p>
                         <h3>Accounts</h3>
                       </div>
                       <button
@@ -2068,7 +2240,7 @@ function App() {
                           onChange={(event) =>
                             setConnectionForm((current) => ({ ...current, proxyUrl: event.target.value }))
                           }
-                          placeholder="Proxy base URL (for combined container: /dav)"
+                          placeholder="Proxy URL (example: https://proxy.example.com or /dav)"
                         />
                       )}
                       <input
@@ -2178,70 +2350,77 @@ function App() {
                   <section className="settings-page-section">
                     <div className="settings-page-header">
                       <div>
-                        <p>Window 2 of 3</p>
-                        <h3>Folders and task lists</h3>
+                        <p>Window 2 of 2</p>
+                        <h3>Nested lists</h3>
                       </div>
                     </div>
 
                     <div className="settings-block">
                       <div className="section-title-row">
-                        <h4>Create list</h4>
-                      </div>
-                      <div className="settings-form split">
-                        <input
-                          value={listDraft.name}
-                          onChange={(event) => setListDraft((current) => ({ ...current, name: event.target.value }))}
-                          placeholder="New task list"
-                        />
-                        <select
-                          value={listDraft.folderId}
-                          onChange={(event) =>
-                            setListDraft((current) => ({ ...current, folderId: event.target.value }))
-                          }
-                        >
-                          <option value="">Create as unfiled</option>
-                          {folderTreeOptions.map((folderOption) => (
-                            <option key={folderOption.id} value={folderOption.id}>
-                              {folderOption.label}
-                            </option>
-                          ))}
-                        </select>
+                        <h4>Smart lists</h4>
                         <button
                           className="ghost-button"
-                          onClick={() => void handleCreateTaskList()}
-                          disabled={!activeAccount || busy}
+                          onClick={() => {
+                            setSmartDraftId(undefined)
+                            setSmartDraftName('')
+                            setSmartDraftDefinition('')
+                            setSmartDraftOrdering(defaultSmartListOrdering())
+                            setIsSmartEditorOpen(true)
+                          }}
                         >
-                          Add list
+                          New smart list
                         </button>
                       </div>
-                    </div>
+                      <div className="stack-list">
+                        {renderedSmartLists.map((smartList, index) => (
+                          <div key={smartList.id}>
+                            {settingsDragSession?.kind === 'smart' && settingsDropIndex === index && (
+                              <div className="task-drop-slot settings-drop-slot" />
+                            )}
+                            <div
+                              ref={(element) => {
+                                const key = settingsRowKey('smart', smartList.id)
+                                if (element) {
+                                  settingsRowsRef.current.set(key, element)
+                                } else {
+                                  settingsRowsRef.current.delete(key)
+                                }
+                              }}
+                              className={`simple-row ${settingsDragSession?.kind === 'smart' && settingsDragSession.itemId === smartList.id ? 'drag-source-hidden' : ''}`}
+                            >
+                              <div className="settings-row-title">
+                                <span
+                                  className="task-drag-handle settings-drag-handle"
+                                  onPointerDown={(event) => handleSettingsDragStart(event, 'smart', smartList.id)}
+                                >
+                                  ::
+                                </span>
+                                <div>
+                                  <strong>{smartList.name}</strong>
+                                  <span>{smartList.definition || 'No definition'}</span>
+                                </div>
+                              </div>
+                              <div className="row-control-group">
+                                <button className="ghost-button" onClick={() => editSmartList(smartList)}>
+                                  Edit
+                                </button>
+                                <button className="ghost-button danger" onClick={() => void handleDeleteSmartList(smartList)}>
+                                  Delete
+                                </button>
+                              </div>
+                            </div>
+                          </div>
+                        ))}
+                        {settingsDragSession?.kind === 'smart' && settingsDropIndex === renderedSmartLists.length && (
+                          <div className="task-drop-slot settings-drop-slot" />
+                        )}
 
-                    <div className="settings-block">
-                      <div className="section-title-row">
-                        <h4>Create folder</h4>
-                      </div>
-                      <div className="settings-form split">
-                        <input
-                          value={folderDraft.name}
-                          onChange={(event) => setFolderDraft((current) => ({ ...current, name: event.target.value }))}
-                          placeholder="New folder"
-                        />
-                        <select
-                          value={folderDraft.parentId}
-                          onChange={(event) =>
-                            setFolderDraft((current) => ({ ...current, parentId: event.target.value }))
-                          }
-                        >
-                          <option value="">Root</option>
-                          {folderTreeOptions.map((folderOption) => (
-                            <option key={folderOption.id} value={folderOption.id}>
-                              {folderOption.label}
-                            </option>
-                          ))}
-                        </select>
-                        <button className="ghost-button" onClick={() => void handleAddFolder()} disabled={!activeAccount}>
-                          Add folder
-                        </button>
+                        {orderedSmartLists.length === 0 && (
+                          <div className="empty-state">
+                            <strong>No smart lists yet.</strong>
+                            <span>Create one to save a reusable query.</span>
+                          </div>
+                        )}
                       </div>
                     </div>
 
@@ -2250,79 +2429,52 @@ function App() {
                         <h4>Structure overview</h4>
                       </div>
                       <div className="structure-overview">
-                        {folderSections.unfiled.length > 0 && (
-                          <div className="structure-group">
-                            <div className="structure-group-label">Unfiled</div>
-                            <div className="structure-children">
-                              {folderSections.unfiled.map((collection) => renderSettingsCollectionRow(collection, 1))}
-                            </div>
+                        <div className="assign-row structure-row create-list-row">
+                          <div className="settings-row-title">
+                            <span className="task-drag-handle settings-drag-placeholder">+</span>
+                            <input
+                              value={listDraft.name}
+                              onChange={(event) => setListDraft((current) => ({ ...current, name: event.target.value }))}
+                              placeholder="New task list"
+                            />
                           </div>
-                        )}
-
-                        {folderSections.rootFolders.map((folder) => renderSettingsFolderTree(folder.id))}
-
-                        {folderSections.unfiled.length === 0 && folderSections.rootFolders.length === 0 && (
-                          <div className="empty-state">
-                            <strong>No folders or task lists yet.</strong>
-                            <span>Create a folder or add a task list above.</span>
-                          </div>
-                        )}
-                      </div>
-                    </div>
-                  </section>
-                )}
-
-                {settingsSection === 'tags' && (
-                  <section className="settings-page-section">
-                    <div className="settings-page-header">
-                      <div>
-                        <p>Window 3 of 3</p>
-                        <h3>Tags</h3>
-                      </div>
-                    </div>
-
-                    <div className="stack-list">
-                      {tagTreeOptions.map((tagOption) => (
-                        <div key={tagOption.id} className="simple-row">
-                          <div>
-                            <strong>{`${tagOption.depth > 0 ? `${'↳ '.repeat(tagOption.depth)}` : ''}#${tagOption.node.name}`}</strong>
-                            <span>{tagOption.node.parentId ? `inside #${tagNameById.get(tagOption.node.parentId)}` : 'root'}</span>
-                          </div>
-                          <div className="row-control-group">
-                            <button className="ghost-button" onClick={() => void handleReorderTag(tagOption.id, 'up')}>
-                              Up
-                            </button>
-                            <button className="ghost-button" onClick={() => void handleReorderTag(tagOption.id, 'down')}>
-                              Down
+                          <div className="assign-actions">
+                            <select
+                              value={listDraft.parentId}
+                              onChange={(event) =>
+                                setListDraft((current) => ({ ...current, parentId: event.target.value }))
+                              }
+                            >
+                              <option value="">Create at root</option>
+                              {collectionTreeOptions.map((collectionOption) => (
+                                <option key={collectionOption.id} value={collectionOption.id}>
+                                  {collectionOption.label}
+                                </option>
+                              ))}
+                            </select>
+                            <button
+                              className="ghost-button"
+                              onClick={() => void handleCreateTaskList()}
+                              disabled={!activeAccount || busy}
+                            >
+                              Add list
                             </button>
                           </div>
                         </div>
-                      ))}
-                    </div>
 
-                    <div className="settings-form split">
-                      <input
-                        value={tagDraft.name}
-                        onChange={(event) => setTagDraft((current) => ({ ...current, name: event.target.value }))}
-                        placeholder="New tag"
-                      />
-                      <select
-                        value={tagDraft.parentId}
-                        onChange={(event) => setTagDraft((current) => ({ ...current, parentId: event.target.value }))}
-                      >
-                        <option value="">Root</option>
-                        {tagTreeOptions.map((tagOption) => (
-                          <option key={tagOption.id} value={tagOption.id}>
-                            {`${tagOption.depth > 0 ? `${'↳ '.repeat(tagOption.depth)}` : ''}#${tagOption.node.name}`}
-                          </option>
-                        ))}
-                      </select>
-                      <button className="ghost-button" onClick={() => void handleAddTag()} disabled={!activeAccount}>
-                        Add tag
-                      </button>
+                        {renderSettingsCollectionList(undefined, 0)}
+
+                        {collectionSections.roots.length === 0 && (
+                          <div className="empty-state">
+                            <strong>No task lists yet.</strong>
+                            <span>Create one with the inline row above.</span>
+                          </div>
+                        )}
+                      </div>
                     </div>
                   </section>
                 )}
+
               </div>
             </div>
           </section>
@@ -2333,6 +2485,22 @@ function App() {
                 <h3>{currentViewTitle}</h3>
                 <p>{visibleTasks.length} tasks</p>
               </div>
+              {activeView?.kind === 'collection' && (
+                <div className="row-control-group">
+                  <button
+                    className={`ghost-button ${collectionViewScope === 'self-and-descendants' ? 'active' : ''}`}
+                    onClick={() => setCollectionViewScope('self-and-descendants')}
+                  >
+                    This list + sublists
+                  </button>
+                  <button
+                    className={`ghost-button ${collectionViewScope === 'self' ? 'active' : ''}`}
+                    onClick={() => setCollectionViewScope('self')}
+                  >
+                    This list only
+                  </button>
+                </div>
+              )}
             </div>
 
             <div className="quick-add-row">
@@ -2392,19 +2560,17 @@ function App() {
                           }
                           openTask(task.id)
                         }}
-                        onPointerDown={(event) => {
-                          const target = event.target as HTMLElement
-                          if (
-                            canManualReorderTasks &&
-                            task.status !== 'completed' &&
-                            !target.closest('.task-check')
-                          ) {
-                            handleTaskDragStart(event, task)
-                          }
-                        }}
                       >
                         {canManualReorderTasks && task.status !== 'completed' && (
-                          <span className="task-drag-handle">::</span>
+                          <span
+                            className="task-drag-handle"
+                            onPointerDown={(event) => {
+                              event.stopPropagation()
+                              handleTaskDragStart(event, task)
+                            }}
+                          >
+                            ::
+                          </span>
                         )}
                         <button
                           className={`task-check ${task.status === 'completed' ? 'checked' : ''}`}
@@ -2420,7 +2586,7 @@ function App() {
                           <span className="task-subline">{task.notes || 'No description'}</span>
                         </button>
                         <div className="task-side">
-                          <span className={`priority-badge priority-${task.priority}`}>P{task.priority || 0}</span>
+                          {task.priority > 0 && <span className={`priority-badge priority-${task.priority}`}>P{task.priority}</span>}
                           <span className="task-date">{displayDate(task.dueDate ?? task.startDate)}</span>
                           <span className="task-list-name">
                             {taskCollections.find((collection) => collection.id === task.collectionId)?.displayName}
@@ -2458,7 +2624,7 @@ function App() {
                       <span className="task-subline">{task.notes || 'No description'}</span>
                     </button>
                     <div className="task-side">
-                      <span className={`priority-badge priority-${task.priority}`}>P{task.priority || 0}</span>
+                      {task.priority > 0 && <span className={`priority-badge priority-${task.priority}`}>P{task.priority}</span>}
                       <span className="task-date">{displayDate(task.dueDate ?? task.startDate)}</span>
                       <span className="task-list-name">
                         {taskCollections.find((collection) => collection.id === task.collectionId)?.displayName}
@@ -2487,7 +2653,7 @@ function App() {
                     <span className="task-subline">{draggedTask.notes || 'No description'}</span>
                   </div>
                   <div className="task-side">
-                    <span className={`priority-badge priority-${draggedTask.priority}`}>P{draggedTask.priority || 0}</span>
+                    {draggedTask.priority > 0 && <span className={`priority-badge priority-${draggedTask.priority}`}>P{draggedTask.priority}</span>}
                     <span className="task-date">{displayDate(draggedTask.dueDate ?? draggedTask.startDate)}</span>
                     <span className="task-list-name">
                       {taskCollections.find((collection) => collection.id === draggedTask.collectionId)?.displayName}
@@ -2564,10 +2730,7 @@ function App() {
                   </div>
                   <div className="editor-chipfield">
                     <span>Priority</span>
-                    <input
-                      type="number"
-                      min="0"
-                      max="4"
+                    <select
                       value={taskDraft.priority}
                       onChange={(event) =>
                         setTaskDraft((current) => ({
@@ -2575,7 +2738,13 @@ function App() {
                           priority: Number.parseInt(event.target.value || '0', 10),
                         }))
                       }
-                    />
+                    >
+                      <option value="0">Normal</option>
+                      <option value="1">P1</option>
+                      <option value="2">P2</option>
+                      <option value="3">P3</option>
+                      <option value="4">P4</option>
+                    </select>
                   </div>
                 </div>
 
@@ -2603,29 +2772,13 @@ function App() {
                 </div>
               </div>
 
-              <div className="chip-field">
-                <span>Tags</span>
-                <div className="tag-grid">
-                  {tagTreeOptions.map((tagOption) => (
-                    <label
-                      key={tagOption.id}
-                      className={`tag-toggle ${taskDraft.tagIds.includes(tagOption.id) ? 'active' : ''}`}
-                    >
-                      <input
-                        type="checkbox"
-                        checked={taskDraft.tagIds.includes(tagOption.id)}
-                        onChange={(event) =>
-                          setTaskDraft((current) => ({
-                            ...current,
-                            tagIds: event.target.checked
-                              ? [...current.tagIds, tagOption.id]
-                              : current.tagIds.filter((entry) => entry !== tagOption.id),
-                          }))
-                        }
-                      />
-                      <span>{`${tagOption.depth > 0 ? `${'↳ '.repeat(tagOption.depth)}` : ''}#${tagOption.node.name}`}</span>
-                    </label>
-                  ))}
+              <div className="simple-row">
+                <div>
+                  <strong>Tags</strong>
+                  <span>
+                    Use hashtags directly in the title or description, for example `#work` or `#waiting`.
+                    {availableTags.length > 0 ? ` Known tags: ${availableTags.slice(0, 6).join(', ')}` : ''}
+                  </span>
                 </div>
               </div>
             </div>
@@ -2636,6 +2789,27 @@ function App() {
           <span>{message}</span>
           {activeAccount && <span>{activeAccount.lastError ?? syncLabel(activeAccount.lastSyncAt)}</span>}
         </footer>
+
+        {settingsDragSession && (draggedSettingsCollection || draggedSettingsSmartList) && (
+          <div
+            className="task-drag-preview settings-drag-preview"
+            style={{
+              width: `${settingsDragSession.width}px`,
+              top: `${settingsDragSession.pointerY - settingsDragSession.offsetY}px`,
+              left: `${settingsDragSession.pointerX - settingsDragSession.offsetX}px`,
+            }}
+          >
+            <div className="simple-row settings-preview-row">
+              <div className="settings-row-title">
+                <span className="task-drag-handle settings-drag-handle">::</span>
+                <div>
+                  <strong>{draggedSettingsCollection?.displayName ?? draggedSettingsSmartList?.name}</strong>
+                  {draggedSettingsSmartList && <span>{draggedSettingsSmartList.definition || 'No definition'}</span>}
+                </div>
+              </div>
+            </div>
+          </div>
+        )}
       </main>
 
       {isSmartEditorOpen && (
@@ -2655,95 +2829,16 @@ function App() {
             <div className="settings-form">
               <input value={smartDraftName} onChange={(event) => setSmartDraftName(event.target.value)} placeholder="Name" />
               <input
-                value={smartDraftFilter.query}
-                onChange={(event) =>
-                  setSmartDraftFilter((current) => ({ ...current, query: event.target.value }))
-                }
-                placeholder="Search query"
+                value={smartDraftDefinition}
+                onChange={(event) => setSmartDraftDefinition(event.target.value)}
+                placeholder='Example: #work & next14 & !status:completed'
               />
-              <div className="settings-form split">
-                <select
-                  value={smartDraftFilter.statuses[0] ?? ''}
-                  onChange={(event) =>
-                    setSmartDraftFilter((current) => ({
-                      ...current,
-                      statuses: event.target.value ? [event.target.value as TaskStatus] : [],
-                    }))
-                  }
-                >
-                  <option value="">Any status</option>
-                  {statuses.map((status) => (
-                    <option key={status} value={status}>
-                      {status}
-                    </option>
-                  ))}
-                </select>
-                <select
-                  value={smartDraftFilter.tagIds[0] ?? ''}
-                  onChange={(event) =>
-                    setSmartDraftFilter((current) => ({
-                      ...current,
-                      tagIds: event.target.value ? [event.target.value] : [],
-                    }))
-                  }
-                >
-                  <option value="">Any tag</option>
-                  {tagTreeOptions.map((tagOption) => (
-                    <option key={tagOption.id} value={tagOption.id}>
-                      {`${tagOption.depth > 0 ? `${'↳ '.repeat(tagOption.depth)}` : ''}#${tagOption.node.name}`}
-                    </option>
-                  ))}
-                </select>
-                <select
-                  value={smartDraftFilter.folderIds[0] ?? ''}
-                  onChange={(event) =>
-                    setSmartDraftFilter((current) => ({
-                      ...current,
-                      folderIds: event.target.value ? [event.target.value] : [],
-                    }))
-                  }
-                >
-                  <option value="">Any folder</option>
-                  {folderTreeOptions.map((folderOption) => (
-                    <option key={folderOption.id} value={folderOption.id}>
-                      {folderOption.label}
-                    </option>
-                  ))}
-                </select>
-              </div>
-              <select
-                value={smartDraftFilter.datePreset}
-                onChange={(event) =>
-                  setSmartDraftFilter((current) => ({
-                    ...current,
-                    datePreset: event.target.value as TaskFilter['datePreset'],
-                  }))
-                }
-              >
-                <option value="any">Any date</option>
-                <option value="overdue">Overdue</option>
-                <option value="today">Today</option>
-                <option value="next7">Next 7 days</option>
-                <option value="custom">Custom range</option>
-              </select>
-              {smartDraftFilter.datePreset === 'custom' && (
-                <div className="settings-form split">
-                  <input
-                    type="date"
-                    value={smartDraftFilter.customFrom ?? ''}
-                    onChange={(event) =>
-                      setSmartDraftFilter((current) => ({ ...current, customFrom: event.target.value }))
-                    }
-                  />
-                  <input
-                    type="date"
-                    value={smartDraftFilter.customTo ?? ''}
-                    onChange={(event) =>
-                      setSmartDraftFilter((current) => ({ ...current, customTo: event.target.value }))
-                    }
-                  />
+              <div className="simple-row">
+                <div>
+                  <strong>Supported syntax</strong>
+                  <span>Use `&`, `|`, `!`, parentheses, `#tag`, `p1`-`p4`, `status:open`, `today`, `overdue`, `next7`, `next14`, `next30`, `list:"Name"`, and `subtree:"Name"`.</span>
                 </div>
-              )}
+              </div>
               <div className="settings-form split">
                 <select
                   value={smartDraftOrdering.field}

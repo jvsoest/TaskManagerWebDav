@@ -1,8 +1,12 @@
 import {
   createDefaultMetadata,
+  defaultFilter,
   defaultSmartListOrdering,
+  expandTreeIds,
+  extractHashtags,
   normalizeOrdering,
   parseSmartListPayload,
+  smartListDefinitionFromFilter,
   serializeSmartListPayload,
 } from './filters'
 import { newUuid } from './ids'
@@ -31,14 +35,18 @@ type DavConnection = Pick<AccountConnectionInput, 'serverUrl' | 'connectionMode'
 function isMetadataCollectionUrl(url: string): boolean {
   return (
     url.endsWith('/taskmanager-meta/') ||
-    url.endsWith('/.taskmanager-meta/')
+    url.endsWith('/.taskmanager-meta/') ||
+    /\/taskmanager-meta-[^/]+\/$/i.test(url) ||
+    /\/\.taskmanager-meta-[^/]+\/$/i.test(url)
   )
 }
 
 function isSmartCollectionUrl(url: string): boolean {
   return (
     url.endsWith('/taskmanager-smart/') ||
-    url.endsWith('/.taskmanager-smart/')
+    url.endsWith('/.taskmanager-smart/') ||
+    /\/taskmanager-smart-[^/]+\/$/i.test(url) ||
+    /\/\.taskmanager-smart-[^/]+\/$/i.test(url)
   )
 }
 
@@ -174,7 +182,7 @@ function connectionErrorMessage(connection: DavConnection, error: unknown): stri
 }
 
 async function proxyRequest(url: string, init: RequestInit, proxyUrl: string): Promise<Response> {
-  const endpoint = new URL('dav', normalizeProxyUrl(proxyUrl)).toString()
+  const endpoint = normalizeProxyUrl(proxyUrl)
   const headers = new Headers(init.headers)
   const body = typeof init.body === 'string' ? init.body : undefined
 
@@ -525,13 +533,20 @@ async function ensureHiddenCollections(
       continue
     }
 
-    const preferredUrl = ensureTrailingSlash(resolveUrl(homeSetUrl, `${target.slug}/`))
-    try {
-      await mkcalendar(connection, preferredUrl, authorization, target.displayName)
-    } catch (error) {
-      const fallbackSlug = `${target.slug}-${newUuid().slice(0, 8)}`
-      const fallbackUrl = ensureTrailingSlash(resolveUrl(homeSetUrl, `${fallbackSlug}/`))
-      await mkcalendar(connection, fallbackUrl, authorization, target.displayName)
+    let created = false
+    for (let attempt = 0; attempt < 5 && !created; attempt += 1) {
+      const uniqueSlug = `${target.slug}-${newUuid().toUpperCase()}`
+      const uniqueUrl = ensureTrailingSlash(resolveUrl(homeSetUrl, `${uniqueSlug}/`))
+      try {
+        await mkcalendar(connection, uniqueUrl, authorization, target.displayName)
+        created = true
+      } catch {
+        // Try another UUID-based hidden collection URL.
+      }
+    }
+
+    if (!created) {
+      throw new Error(`Failed to create ${target.displayName} collection.`)
     }
   }
 
@@ -613,14 +628,35 @@ export async function discoverAccount(
   }
 }
 
-function slugifyCollectionName(name: string): string {
-  const normalized = name
-    .trim()
-    .toLowerCase()
-    .replace(/[^a-z0-9]+/g, '-')
-    .replace(/^-+|-+$/g, '')
+function rfcPriorityFromAppPriority(priority: number): number {
+  switch (priority) {
+    case 1:
+      return 1
+    case 2:
+      return 3
+    case 3:
+      return 5
+    case 4:
+      return 7
+    default:
+      return 0
+  }
+}
 
-  return normalized || 'tasks'
+function appPriorityFromRfcPriority(priority: number): number {
+  if (priority <= 0) {
+    return 0
+  }
+  if (priority <= 1) {
+    return 1
+  }
+  if (priority <= 3) {
+    return 2
+  }
+  if (priority <= 5) {
+    return 3
+  }
+  return 4
 }
 
 export async function createTaskCollection(account: Account, displayName: string): Promise<TaskCollection> {
@@ -644,15 +680,10 @@ export async function createTaskCollection(account: Account, displayName: string
   )
 
   const takenUrls = new Set(collections.map((collection) => ensureTrailingSlash(collection.url)))
-  const slugBase = slugifyCollectionName(displayName)
-  let slug = slugBase
-  let counter = 2
-  let targetUrl = ensureTrailingSlash(resolveUrl(homeSetUrl, `${slug}/`))
+  let targetUrl = ensureTrailingSlash(resolveUrl(homeSetUrl, `${newUuid().toUpperCase()}/`))
 
   while (takenUrls.has(targetUrl)) {
-    slug = `${slugBase}-${counter}`
-    counter += 1
-    targetUrl = ensureTrailingSlash(resolveUrl(homeSetUrl, `${slug}/`))
+    targetUrl = ensureTrailingSlash(resolveUrl(homeSetUrl, `${newUuid().toUpperCase()}/`))
   }
 
   const actualUrl = await mkcalendar(connectionFromAccount(account), targetUrl, authorization, displayName.trim())
@@ -801,13 +832,16 @@ function parseTaskFromIcs(
     title: unescapeIcs(props.get('SUMMARY')?.[0] ?? ''),
     notes: unescapeIcs(props.get('DESCRIPTION')?.[0] ?? ''),
     status: (props.get('STATUS')?.[0]?.toLowerCase() ?? 'needs-action') as TaskItem['status'],
-    priority: Number.parseInt(props.get('PRIORITY')?.[0] ?? '0', 10) || 0,
+    priority: appPriorityFromRfcPriority(Number.parseInt(props.get('PRIORITY')?.[0] ?? '0', 10) || 0),
     startDate: parseIcsDate(props.get('DTSTART')?.[0]),
     dueDate: parseIcsDate(props.get('DUE')?.[0]),
     completedAt: parseIcsDate(props.get('COMPLETED')?.[0]),
     createdAt: parseIcsDate(props.get('CREATED')?.[0]) ?? new Date().toISOString(),
     updatedAt: parseIcsDate(props.get('LAST-MODIFIED')?.[0]) ?? new Date().toISOString(),
-    tagIds: props.get('X-TASKMANAGER-TAGS')?.[0]?.split(',').filter(Boolean) ?? [],
+    tagIds: extractHashtags(
+      unescapeIcs(props.get('SUMMARY')?.[0] ?? ''),
+      unescapeIcs(props.get('DESCRIPTION')?.[0] ?? ''),
+    ),
     syncState: 'synced',
   }
 }
@@ -898,13 +932,14 @@ function serializeMetadataDocument(doc: MetadataDocument, taskCollections: TaskC
   const collectionUrlById = new Map(taskCollections.map((collection) => [collection.id, ensureTrailingSlash(collection.url)]))
   const serializedDoc: MetadataDocument = {
     ...doc,
-    collectionFolders: Object.fromEntries(
-      Object.entries(doc.collectionFolders).map(([collectionId, folderId]) => [
+    collectionParents: Object.fromEntries(
+      Object.entries(doc.collectionParents).map(([collectionId, parentId]) => [
         collectionUrlById.get(collectionId) ?? collectionId,
-        folderId,
+        parentId ? collectionUrlById.get(parentId) ?? parentId : undefined,
       ]),
     ),
     collectionOrder: doc.collectionOrder.map((collectionId) => collectionUrlById.get(collectionId) ?? collectionId),
+    smartListOrder: doc.smartListOrder,
     taskListOrderings: Object.fromEntries(
       Object.entries(doc.taskListOrderings).map(([collectionId, ordering]) => [
         collectionUrlById.get(collectionId) ?? collectionId,
@@ -958,8 +993,71 @@ function extractCollectionRef(value: string): string {
   return value
 }
 
+function legacyVisibleCollectionOrder(rawDoc: Record<string, unknown>, taskCollections: TaskCollection[]): string[] {
+  const collectionIdByRef = new Map<string, string>()
+  taskCollections.forEach((collection) => {
+    collectionIdByRef.set(collection.id, collection.id)
+    collectionIdByRef.set(ensureTrailingSlash(collection.url), collection.id)
+  })
+
+  const orderedRefs = Array.isArray(rawDoc.collectionOrder) ? rawDoc.collectionOrder.map(String) : []
+  const baseOrder = orderedRefs
+    .map((storedCollectionRef) => collectionIdByRef.get(extractCollectionRef(storedCollectionRef)))
+    .filter((collectionId): collectionId is string => Boolean(collectionId))
+  const orderedIds = [...baseOrder, ...taskCollections.map((collection) => collection.id).filter((id) => !baseOrder.includes(id))]
+
+  const folderNodes = Array.isArray(rawDoc.folderNodes) ? rawDoc.folderNodes as Array<{ id: string; parentId?: string }> : []
+  const collectionFolders = rawDoc.collectionFolders && typeof rawDoc.collectionFolders === 'object'
+    ? rawDoc.collectionFolders as Record<string, string | undefined>
+    : {}
+
+  if (folderNodes.length === 0 || Object.keys(collectionFolders).length === 0) {
+    return orderedIds
+  }
+
+  const rootFolders = folderNodes.filter((folder) => !folder.parentId)
+  const folderChildren = new Map<string, typeof folderNodes>()
+  folderNodes.forEach((folder) => {
+    if (!folder.parentId) {
+      return
+    }
+    const entries = folderChildren.get(folder.parentId) ?? []
+    entries.push(folder)
+    folderChildren.set(folder.parentId, entries)
+  })
+
+  const orderedIdsSet = new Set(orderedIds)
+  const collectionsByFolder = new Map<string, string[]>()
+  orderedIds.forEach((collectionId) => {
+    const storedFolderRef = collectionFolders[collectionId] ?? collectionFolders[taskCollections.find((collection) => collection.id === collectionId)?.url ?? '']
+    if (!storedFolderRef) {
+      return
+    }
+    const entries = collectionsByFolder.get(storedFolderRef) ?? []
+    if (orderedIdsSet.has(collectionId)) {
+      entries.push(collectionId)
+    }
+    collectionsByFolder.set(storedFolderRef, entries)
+  })
+
+  const flattened: string[] = []
+  const unassigned = orderedIds.filter((collectionId) => {
+    const storedFolderRef = collectionFolders[collectionId] ?? collectionFolders[taskCollections.find((collection) => collection.id === collectionId)?.url ?? '']
+    return !storedFolderRef
+  })
+  flattened.push(...unassigned)
+
+  function appendFolder(folderId: string) {
+    flattened.push(...(collectionsByFolder.get(folderId) ?? []))
+    ;(folderChildren.get(folderId) ?? []).forEach((child) => appendFolder(child.id))
+  }
+
+  rootFolders.forEach((folder) => appendFolder(folder.id))
+  return [...flattened, ...orderedIds.filter((collectionId) => !flattened.includes(collectionId))]
+}
+
 function normalizeMetadataDocument(
-  rawDoc: MetadataDocument,
+  rawDoc: Record<string, unknown>,
   accountId: string,
   taskCollections: TaskCollection[],
   url?: string,
@@ -971,17 +1069,21 @@ function normalizeMetadataDocument(
     collectionIdByRef.set(ensureTrailingSlash(collection.url), collection.id)
   })
 
-  const normalizedCollectionFolders = Object.fromEntries(
-    Object.entries(rawDoc.collectionFolders ?? {}).flatMap(([storedCollectionRef, folderId]) => {
+  const normalizedCollectionParents = Object.fromEntries(
+    Object.entries((rawDoc.collectionParents as Record<string, string | undefined> | undefined) ?? {}).flatMap(([storedCollectionRef, storedParentRef]) => {
       const collectionId = collectionIdByRef.get(extractCollectionRef(storedCollectionRef))
-      return collectionId ? [[collectionId, folderId]] : []
+      const parentId = storedParentRef ? collectionIdByRef.get(extractCollectionRef(storedParentRef)) : undefined
+      return collectionId ? [[collectionId, parentId]] : []
     }),
   )
 
-  const normalizedCollectionOrder = (rawDoc.collectionOrder ?? []).flatMap((storedCollectionRef) => {
+  const normalizedCollectionOrder = ((rawDoc.collectionParents as object | undefined) ? (rawDoc.collectionOrder as string[] | undefined) ?? [] : legacyVisibleCollectionOrder(rawDoc, taskCollections)).flatMap((storedCollectionRef) => {
     const collectionId = collectionIdByRef.get(extractCollectionRef(storedCollectionRef))
     return collectionId ? [collectionId] : []
   })
+  const normalizedSmartListOrder = Array.isArray(rawDoc.smartListOrder)
+    ? rawDoc.smartListOrder.map(String)
+    : []
   const normalizedTaskListOrderings = Object.fromEntries(
     Object.entries(rawDoc.taskListOrderings ?? {}).flatMap(([storedCollectionRef, ordering]) => {
       const collectionId = collectionIdByRef.get(extractCollectionRef(storedCollectionRef))
@@ -996,14 +1098,64 @@ function normalizeMetadataDocument(
   )
 
   return {
-    ...rawDoc,
+    ...createDefaultMetadata(accountId),
     accountId,
-    collectionFolders: normalizedCollectionFolders,
+    collectionParents: normalizedCollectionParents,
     collectionOrder: normalizedCollectionOrder,
+    smartListOrder: normalizedSmartListOrder,
     taskListOrderings: normalizedTaskListOrderings,
     manualTaskOrder: normalizedManualTaskOrder,
+    updatedAt: typeof rawDoc.updatedAt === 'string' ? rawDoc.updatedAt : new Date().toISOString(),
     url,
     etag,
+  }
+}
+
+function migrateSmartListFilter(
+  filter: ReturnType<typeof parseSmartListPayload>['legacyFilter'],
+  rawDoc: Record<string, unknown>,
+  taskCollections: TaskCollection[],
+): ReturnType<typeof parseSmartListPayload>['legacyFilter'] {
+  if (!filter) {
+    return undefined
+  }
+
+  if (filter.collectionIds.length > 0) {
+    return filter
+  }
+
+  const legacyFolderIds = Array.isArray((filter as { folderIds?: string[] }).folderIds)
+    ? (filter as { folderIds?: string[] }).folderIds ?? []
+    : []
+  if (legacyFolderIds.length === 0) {
+    return filter
+  }
+
+  const rawFolderNodes = Array.isArray(rawDoc.folderNodes)
+    ? (rawDoc.folderNodes as Array<{ id: string; parentId?: string }>)
+    : []
+  const rawCollectionFolders = rawDoc.collectionFolders && typeof rawDoc.collectionFolders === 'object'
+    ? (rawDoc.collectionFolders as Record<string, string | undefined>)
+    : {}
+  const legacyScope = (filter as { includeSubfolders?: boolean }).includeSubfolders !== false
+    ? expandTreeIds(legacyFolderIds, rawFolderNodes)
+    : new Set(legacyFolderIds)
+
+  const collectionIdByRef = new Map<string, string>()
+  taskCollections.forEach((collection) => {
+    collectionIdByRef.set(collection.id, collection.id)
+    collectionIdByRef.set(ensureTrailingSlash(collection.url), collection.id)
+  })
+
+  const collectionIds = Object.entries(rawCollectionFolders).flatMap(([storedCollectionRef, folderId]) => {
+    const collectionId = collectionIdByRef.get(extractCollectionRef(storedCollectionRef))
+    return collectionId && folderId && legacyScope.has(folderId) ? [collectionId] : []
+  })
+
+  return {
+    ...filter,
+    collectionIds,
+    includeDescendantCollections: (filter as { includeSubfolders?: boolean }).includeSubfolders !== false,
   }
 }
 
@@ -1024,11 +1176,9 @@ function smartListTask(smartList: SmartList, collectionId: string): TaskItem {
   }
 }
 
-function taskToIcs(task: TaskItem, metadataDoc: MetadataDocument): string {
-  const tagNameById = new Map(metadataDoc.tagNodes.map((tag) => [tag.id, tag.name]))
+function taskToIcs(task: TaskItem): string {
   const categoryNames = task.tagIds
-    .map((tagId) => tagNameById.get(tagId))
-    .filter((tagName): tagName is string => Boolean(tagName))
+    .map((tag) => tag.replace(/^#/, ''))
     .map(escapeIcs)
     .join(',')
 
@@ -1042,10 +1192,9 @@ function taskToIcs(task: TaskItem, metadataDoc: MetadataDocument): string {
     `SUMMARY:${escapeIcs(task.title)}`,
     `DESCRIPTION:${escapeIcs(task.notes)}`,
     `STATUS:${task.status.toUpperCase()}`,
-    `PRIORITY:${task.priority}`,
+    `PRIORITY:${rfcPriorityFromAppPriority(task.priority)}`,
     `CREATED:${formatIcsDate(task.createdAt)}`,
     `LAST-MODIFIED:${formatIcsDate(task.updatedAt)}`,
-    `X-TASKMANAGER-TAGS:${task.tagIds.join(',')}`,
   ]
 
   if (categoryNames) {
@@ -1080,14 +1229,16 @@ export async function syncAccount(account: Account, collections: TaskCollection[
     metadataEntries.find((entry) => entry.href.endsWith(METADATA_RESOURCE_NAME)) ?? metadataEntries[0]
   const defaultMetadata = createDefaultMetadata(account.id)
   let metadataDoc = defaultMetadata
+  let rawMetadataDoc: Record<string, unknown> = defaultMetadata as unknown as Record<string, unknown>
   if (metadataEntry?.payload) {
     try {
       const parsedMetadataTask = parseTaskFromIcs(metadataEntry.payload, account.id, metadataCollection.id)
+      rawMetadataDoc = {
+        ...defaultMetadata,
+        ...JSON.parse(parsedMetadataTask?.notes ?? '{}'),
+      }
       metadataDoc = normalizeMetadataDocument(
-        {
-          ...defaultMetadata,
-          ...JSON.parse(parsedMetadataTask?.notes ?? '{}'),
-        },
+        rawMetadataDoc,
         account.id,
         taskCollections,
         metadataEntry.href,
@@ -1123,12 +1274,16 @@ export async function syncAccount(account: Account, collections: TaskCollection[
         return entries
       }
       const parsedPayload = parseSmartListPayload(task.notes)
+      const migratedFilter = migrateSmartListFilter(parsedPayload.legacyFilter, rawMetadataDoc, taskCollections)
+      const definition =
+        parsedPayload.definition || (migratedFilter ? smartListDefinitionFromFilter(migratedFilter, taskCollections) : '')
 
       entries.push({
         id: task.id,
         accountId: task.accountId,
+        definition,
         name: task.title,
-        filter: parsedPayload.filter,
+        filter: migratedFilter ?? defaultFilter(),
         ordering: parsedPayload.ordering ?? defaultSmartListOrdering(),
         url: entry.href,
         etag: entry.etag,
@@ -1151,7 +1306,6 @@ export async function upsertTaskRemote(
   account: Account,
   collection: TaskCollection,
   task: TaskItem,
-  metadataDoc: MetadataDocument,
 ): Promise<{ url: string; etag?: string }> {
   const connection = connectionFromAccount(account)
   const url = task.url ?? resolveUrl(collection.url, `${task.uid}.ics`)
@@ -1170,7 +1324,7 @@ export async function upsertTaskRemote(
   const response = await davRequest(connection, url, {
     method: 'PUT',
     headers,
-    body: taskToIcs(task, metadataDoc),
+    body: taskToIcs(task),
   })
 
   if (!response.ok && ![201, 204].includes(response.status)) {
@@ -1250,7 +1404,7 @@ export async function saveMetadataRemote(
   })
 
   try {
-    return await upsertTaskRemote(account, collection, metadataTaskItem(collection, metadataDoc), metadataDoc)
+    return await upsertTaskRemote(account, collection, metadataTaskItem(collection, metadataDoc))
   } catch (error) {
     const isNotFoundFailure =
       error instanceof Error && error.message.includes('Task save failed (404)')
@@ -1274,7 +1428,6 @@ export async function saveMetadataRemote(
         account,
         refreshedCollection,
         metadataTaskItem(refreshedCollection, refreshedDoc),
-        refreshedDoc,
       )
     }
 
@@ -1284,7 +1437,7 @@ export async function saveMetadataRemote(
 
     const url = metadataDoc.url ?? resolveUrl(collection.url, METADATA_RESOURCE_NAME)
     const latestEtag = await fetchResourceEtag(connectionFromAccount(account), url, authHeader(account.username, account.password))
-    return upsertTaskRemote(account, collection, metadataTaskItem(collection, metadataDoc, url, latestEtag), metadataDoc)
+    return upsertTaskRemote(account, collection, metadataTaskItem(collection, metadataDoc, url, latestEtag))
   }
 }
 
@@ -1292,7 +1445,6 @@ export async function upsertSmartListRemote(
   account: Account,
   collection: TaskCollection,
   smartList: SmartList,
-  metadataDoc: MetadataDocument,
 ): Promise<{ url: string; etag?: string }> {
   return upsertTaskRemote(
     account,
@@ -1302,7 +1454,6 @@ export async function upsertSmartListRemote(
       url: smartList.url ?? resolveUrl(collection.url, `smart-${smartList.id}.ics`),
       etag: smartList.etag,
     },
-    metadataDoc,
   )
 }
 
