@@ -29,6 +29,7 @@
 - Removed the inline quick-add row and the sidebar add-task button.
 - Added a single `+` action next to the current list or smart-list title to open the task editor.
 - The task editor now autofocuses the title field, and pressing `Enter` in the title saves the task and returns to the list view.
+- New tasks now default to the currently selected regular list, or to the first regular list in UI order when the current view is a smart list.
 
 ### Verification
 - `npm run build`

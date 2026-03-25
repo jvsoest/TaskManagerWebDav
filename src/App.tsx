@@ -463,7 +463,6 @@ function App() {
   const smartCollection = activeCollections.find((collection) => collection.kind === 'smart')
   const activeTasks = snapshot.tasks.filter((task) => task.accountId === activeAccountId)
   const activeSmartLists = snapshot.smartLists.filter((smartList) => smartList.accountId === activeAccountId)
-  const defaultCollectionId = taskCollections[0]?.id
   const metadataDoc =
     snapshot.metadataDocs.find((doc) => doc.accountId === activeAccountId) ??
     (activeAccountId ? createDefaultMetadata(activeAccountId) : undefined)
@@ -510,6 +509,10 @@ function App() {
 
     return orderedSmartLists.filter((smartList) => smartList.id !== settingsDragSession.itemId)
   }, [orderedSmartLists, settingsDragSession])
+  const preferredTaskCollectionId =
+    activeView?.kind === 'collection'
+      ? activeView.collectionId
+      : orderedTaskCollections[0]?.id
   const availableTags = useMemo(
     () => Array.from(new Set(activeTasks.flatMap((task) => task.tagIds))).sort(),
     [activeTasks],
@@ -641,10 +644,10 @@ function App() {
       return
     }
 
-    const nextDraft = createDraft(defaultCollectionId, activeAccountId)
+    const nextDraft = createDraft(preferredTaskCollectionId, activeAccountId)
     setTaskDraft((current) => (sameTaskDraft(current, nextDraft) ? current : nextDraft))
     setDescriptionMode(defaultDescriptionMode(nextDraft.notes))
-  }, [activeAccountId, defaultCollectionId, isCreatingTask, selectedTaskId, snapshot.tasks])
+  }, [activeAccountId, isCreatingTask, preferredTaskCollectionId, selectedTaskId, snapshot.tasks])
 
   useEffect(() => {
     if (!isEditorMode) {
@@ -917,7 +920,7 @@ function App() {
   function closeEditor() {
     setSelectedTaskId(undefined)
     setIsCreatingTask(false)
-    setTaskDraft(createDraft(defaultCollectionId, activeAccountId))
+    setTaskDraft(createDraft(preferredTaskCollectionId, activeAccountId))
     setDescriptionMode('edit')
   }
 
@@ -926,7 +929,7 @@ function App() {
     setSelectedTaskId(undefined)
     setIsCreatingTask(true)
     setDescriptionMode('edit')
-    setTaskDraft(createDraft(defaultCollectionId, activeAccountId))
+    setTaskDraft(createDraft(preferredTaskCollectionId, activeAccountId))
   }
 
   function openSettings(section: SettingsSection = 'accounts') {
