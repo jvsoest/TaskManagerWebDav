@@ -37,6 +37,7 @@ export function createDefaultMetadata(accountId: string): MetadataDocument {
     collectionOrder: [],
     smartListOrder: [],
     taskListOrderings: {},
+    taskListShowCompleted: {},
     manualTaskOrder: {},
     updatedAt: new Date().toISOString(),
   }
@@ -87,11 +88,12 @@ export function extractHashtags(...parts: Array<string | undefined>): string[] {
   return Array.from(matches).sort()
 }
 
-export function serializeSmartListPayload(smartList: Pick<SmartList, 'definition' | 'ordering'>): string {
+export function serializeSmartListPayload(smartList: Pick<SmartList, 'definition' | 'ordering' | 'showCompleted'>): string {
   return JSON.stringify(
     {
       definition: smartList.definition,
       ordering: smartList.ordering,
+      showCompleted: smartList.showCompleted,
     },
     null,
     2,
@@ -116,6 +118,7 @@ export function parseFilter(value: string): TaskFilter {
 export function parseSmartListPayload(value: string): {
   definition: string
   ordering: TaskOrdering
+  showCompleted: boolean
   legacyFilter?: TaskFilter
 } {
   try {
@@ -123,6 +126,7 @@ export function parseSmartListPayload(value: string): {
       definition?: string
       filter?: Partial<TaskFilter>
       ordering?: Partial<TaskOrdering>
+      showCompleted?: boolean
     }
 
     if (parsed && typeof parsed === 'object') {
@@ -130,6 +134,7 @@ export function parseSmartListPayload(value: string): {
         return {
           definition: parsed.definition,
           ordering: normalizeOrdering(parsed.ordering, defaultSmartListOrdering()),
+          showCompleted: parsed.showCompleted === true,
         }
       }
 
@@ -139,6 +144,7 @@ export function parseSmartListPayload(value: string): {
           definition: '',
           legacyFilter,
           ordering: normalizeOrdering(parsed.ordering, defaultSmartListOrdering()),
+          showCompleted: parsed.showCompleted === true,
         }
       }
     }
@@ -149,6 +155,7 @@ export function parseSmartListPayload(value: string): {
   return {
     definition: value.trim(),
     ordering: defaultSmartListOrdering(),
+    showCompleted: false,
   }
 }
 

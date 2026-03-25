@@ -55,6 +55,7 @@ export interface MetadataDocument {
   collectionOrder: string[]
   smartListOrder: string[]
   taskListOrderings: Record<string, TaskOrdering | undefined>
+  taskListShowCompleted: Record<string, boolean | undefined>
   manualTaskOrder: Record<string, string[] | undefined>
   updatedAt: string
   url?: string
@@ -102,6 +103,7 @@ export interface SmartList {
   name: string
   filter: TaskFilter
   ordering: TaskOrdering
+  showCompleted: boolean
   url?: string
   etag?: string
   syncState: SyncState

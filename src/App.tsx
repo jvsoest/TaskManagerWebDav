@@ -414,6 +414,7 @@ function App() {
   const [smartDraftName, setSmartDraftName] = useState('')
   const [smartDraftDefinition, setSmartDraftDefinition] = useState('')
   const [smartDraftOrdering, setSmartDraftOrdering] = useState<TaskOrdering>(defaultSmartListOrdering())
+  const [smartDraftShowCompleted, setSmartDraftShowCompleted] = useState(false)
   const [searchText, setSearchText] = useState('')
   const [selectedViewTags, setSelectedViewTags] = useState<string[]>([])
   const [busy, setBusy] = useState(false)
@@ -739,6 +740,12 @@ function App() {
         : undefined,
     [activeView, orderedSmartLists],
   )
+  const currentViewShowCompleted =
+    activeView?.kind === 'smart'
+      ? activeSmartList?.showCompleted === true
+      : activeView?.kind === 'collection'
+        ? metadataDoc?.taskListShowCompleted[activeView.collectionId] === true
+        : false
   const currentTaskListOrdering = useMemo(
     () =>
       activeView?.kind === 'collection'
@@ -801,14 +808,17 @@ function App() {
     [scopedVisibleTasks],
   )
   const visibleTasks = useMemo(() => {
-    if (selectedViewTags.length === 0) {
-      return scopedVisibleTasks
-    }
+    const tagFilteredTasks =
+      selectedViewTags.length === 0
+        ? scopedVisibleTasks
+        : scopedVisibleTasks.filter((task) =>
+            selectedViewTags.every((tag) => task.tagIds.includes(tag)),
+          )
 
-    return scopedVisibleTasks.filter((task) =>
-      selectedViewTags.every((tag) => task.tagIds.includes(tag)),
-    )
-  }, [scopedVisibleTasks, selectedViewTags])
+    return currentViewShowCompleted
+      ? tagFilteredTasks
+      : tagFilteredTasks.filter((task) => task.status !== 'completed')
+  }, [currentViewShowCompleted, scopedVisibleTasks, selectedViewTags])
   const openVisibleTasks = useMemo(
     () => visibleTasks.filter((task) => task.status !== 'completed'),
     [visibleTasks],
@@ -1398,6 +1408,24 @@ function App() {
         updatedAt: new Date().toISOString(),
       },
       'Task list ordering updated.',
+    )
+  }
+
+  async function handleUpdateTaskListShowCompleted(collectionId: string, showCompleted: boolean) {
+    if (!metadataDoc) {
+      return
+    }
+
+    await saveMetadata(
+      {
+        ...metadataDoc,
+        taskListShowCompleted: {
+          ...metadataDoc.taskListShowCompleted,
+          [collectionId]: showCompleted,
+        },
+        updatedAt: new Date().toISOString(),
+      },
+      'Task list visibility updated.',
     )
   }
 
@@ -2242,6 +2270,7 @@ function App() {
       name: smartDraftName.trim(),
       filter: defaultFilter(),
       ordering: normalizeOrdering(smartDraftOrdering, defaultSmartListOrdering()),
+      showCompleted: smartDraftShowCompleted,
       syncState: 'syncing',
       updatedAt: new Date().toISOString(),
       url: existingSmartList?.url,
@@ -2279,6 +2308,7 @@ function App() {
       setSmartDraftName('')
       setSmartDraftDefinition('')
       setSmartDraftOrdering(defaultSmartListOrdering())
+      setSmartDraftShowCompleted(false)
       setIsSmartEditorOpen(false)
     } catch (error) {
       const failure = error instanceof Error ? error.message : 'Smart list save failed.'
@@ -2361,6 +2391,7 @@ function App() {
     setSmartDraftName(smartList.name)
     setSmartDraftDefinition(smartList.definition)
     setSmartDraftOrdering(normalizeOrdering(smartList.ordering, defaultSmartListOrdering()))
+    setSmartDraftShowCompleted(smartList.showCompleted)
     setIsSmartEditorOpen(true)
   }
 
@@ -2380,8 +2411,16 @@ function App() {
         parentId: metadataDoc?.collectionParents[entry.id],
       })),
     )
-    const selfTaskCount = activeTasks.filter((task) => task.collectionId === collection.id).length
-    const descendantTaskCount = activeTasks.filter((task) => descendantIds.has(task.collectionId)).length
+    const selfTaskCount = activeTasks.filter(
+      (task) =>
+        task.collectionId === collection.id &&
+        (metadataDoc?.taskListShowCompleted[collection.id] === true || task.status !== 'completed'),
+    ).length
+    const descendantTaskCount = activeTasks.filter(
+      (task) =>
+        descendantIds.has(task.collectionId) &&
+        (metadataDoc?.taskListShowCompleted[task.collectionId] === true || task.status !== 'completed'),
+    ).length
     const taskCount = hasChildren && isCollapsed ? descendantTaskCount : selfTaskCount
 
     return (
@@ -2437,6 +2476,7 @@ function App() {
 
   function renderSettingsCollectionRow(collection: (typeof orderedTaskCollections)[number], depth: number) {
     const ordering = normalizeOrdering(metadataDoc?.taskListOrderings[collection.id], defaultTaskListOrdering())
+    const showCompleted = metadataDoc?.taskListShowCompleted[collection.id] === true
 
     return (
       <div key={collection.id} className="structure-branch">
@@ -2529,6 +2569,14 @@ function App() {
               <option value="manual">Manual</option>
               <option value="property">Property</option>
             </select>
+            <label className="checkbox-row compact">
+              <input
+                type="checkbox"
+                checked={showCompleted}
+                onChange={(event) => void handleUpdateTaskListShowCompleted(collection.id, event.target.checked)}
+              />
+              Show completed
+            </label>
             {ordering.mode === 'property' && (
               <>
                 <select
@@ -2661,6 +2709,7 @@ function App() {
                   setSmartDraftName('')
                   setSmartDraftDefinition('')
                   setSmartDraftOrdering(defaultSmartListOrdering())
+                  setSmartDraftShowCompleted(false)
                   setIsSmartEditorOpen(true)
                 }}
               >
@@ -2680,7 +2729,27 @@ function App() {
                   }}
                 >
                   <span>{smartList.name}</span>
-                  <strong>{metadataDoc ? getSmartListCount(smartList, activeTasks, metadataDoc, taskCollections) : 0}</strong>
+                  <strong>
+                    {metadataDoc
+                      ? getSmartListCount(
+                          smartList.showCompleted
+                            ? smartList
+                            : {
+                                ...smartList,
+                                definition: smartList.definition
+                                  ? `(${smartList.definition}) & !status:completed`
+                                  : '!status:completed',
+                                filter: {
+                                  ...smartList.filter,
+                                  statuses: smartList.filter.statuses.filter((status) => status !== 'completed'),
+                                },
+                              },
+                          activeTasks,
+                          metadataDoc,
+                          taskCollections,
+                        )
+                      : 0}
+                  </strong>
                 </button>
                 <button className="ghost-icon small" onClick={() => editSmartList(smartList)}>
                   ...
@@ -2998,6 +3067,7 @@ function App() {
                             setSmartDraftName('')
                             setSmartDraftDefinition('')
                             setSmartDraftOrdering(defaultSmartListOrdering())
+                            setSmartDraftShowCompleted(false)
                             setIsSmartEditorOpen(true)
                           }}
                         >
@@ -3686,8 +3756,16 @@ function App() {
                     <option key={direction.value} value={direction.value}>
                       {direction.label}
                     </option>
-                  ))}
-                </select>
+                    ))}
+                  </select>
+                <label className="checkbox-row compact">
+                  <input
+                    type="checkbox"
+                    checked={smartDraftShowCompleted}
+                    onChange={(event) => setSmartDraftShowCompleted(event.target.checked)}
+                  />
+                  Show completed
+                </label>
               </div>
               <div className="editor-header-actions">
                 {smartDraftId && (

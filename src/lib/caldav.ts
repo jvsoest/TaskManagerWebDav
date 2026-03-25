@@ -1186,6 +1186,12 @@ function normalizeMetadataDocument(
       return collectionId ? [[collectionId, normalizeOrdering(ordering, { mode: 'manual', field: 'dueDate', direction: 'asc' })]] : []
     }),
   )
+  const normalizedTaskListShowCompleted = Object.fromEntries(
+    Object.entries(rawDoc.taskListShowCompleted ?? {}).flatMap(([storedCollectionRef, showCompleted]) => {
+      const collectionId = collectionIdByRef.get(extractCollectionRef(storedCollectionRef))
+      return collectionId ? [[collectionId, showCompleted === true]] : []
+    }),
+  )
   const normalizedManualTaskOrder = Object.fromEntries(
     Object.entries(rawDoc.manualTaskOrder ?? {}).flatMap(([storedCollectionRef, taskIds]) => {
       const collectionId = collectionIdByRef.get(extractCollectionRef(storedCollectionRef))
@@ -1200,6 +1206,7 @@ function normalizeMetadataDocument(
     collectionOrder: normalizedCollectionOrder,
     smartListOrder: normalizedSmartListOrder,
     taskListOrderings: normalizedTaskListOrderings,
+    taskListShowCompleted: normalizedTaskListShowCompleted,
     manualTaskOrder: normalizedManualTaskOrder,
     updatedAt: typeof rawDoc.updatedAt === 'string' ? rawDoc.updatedAt : new Date().toISOString(),
     url,
@@ -1391,6 +1398,7 @@ export async function syncAccount(account: Account): Promise<SyncResult> {
         name: task.title,
         filter: migratedFilter ?? defaultFilter(),
         ordering: parsedPayload.ordering ?? defaultSmartListOrdering(),
+        showCompleted: parsedPayload.showCompleted,
         url: entry.href,
         etag: entry.etag,
         syncState: 'synced' as const,
