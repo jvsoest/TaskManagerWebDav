@@ -12,6 +12,7 @@
 
 ### Smart lists and data integrity
 - Fixed smart-list editing so saving an existing smart list updates it in place instead of creating duplicates.
+- Changed app startup so it opens the first smart list by order, and falls back to the first normal list only when no smart lists exist.
 
 ### Mobile and navigation
 - Moved `Sync` and `Settings` actions into the sidebar footer so they stay reachable on phones.

@@ -549,14 +549,14 @@ function App() {
       return
     }
 
-    if (orderedTaskCollections[0]) {
-      setActiveView({ kind: 'collection', collectionId: orderedTaskCollections[0].id })
-      setCollectionViewScope('self')
+    if (orderedSmartLists[0]) {
+      setActiveView({ kind: 'smart', smartListId: orderedSmartLists[0].id })
       return
     }
 
-    if (orderedSmartLists[0]) {
-      setActiveView({ kind: 'smart', smartListId: orderedSmartLists[0].id })
+    if (orderedTaskCollections[0]) {
+      setActiveView({ kind: 'collection', collectionId: orderedTaskCollections[0].id })
+      setCollectionViewScope('self')
     }
   }, [activeAccountId, activeView, orderedSmartLists, orderedTaskCollections])
 
@@ -801,7 +801,7 @@ function App() {
       ? taskCollections.find((collection) => collection.id === activeView.collectionId)?.displayName ?? 'Task list'
       : activeView?.kind === 'smart'
         ? orderedSmartLists.find((smartList) => smartList.id === activeView.smartListId)?.name ?? 'Smart list'
-        : orderedTaskCollections[0]?.displayName ?? orderedSmartLists[0]?.name ?? 'Tasks'
+        : orderedSmartLists[0]?.name ?? orderedTaskCollections[0]?.displayName ?? 'Tasks'
 
   function replaceSnapshot(nextSnapshot: AppSnapshot) {
     startTransition(() => setSnapshot(nextSnapshot))
