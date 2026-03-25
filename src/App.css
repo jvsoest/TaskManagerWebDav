@@ -538,6 +538,10 @@ button {
   background: #fff9f8;
 }
 
+.task-row.keyboard-selected {
+  box-shadow: 0 0 0 2px rgba(219, 76, 63, 0.18);
+}
+
 .task-row.reorderable {
   cursor: default;
 }
@@ -791,6 +795,40 @@ button {
 .description-panel .ghost-button {
   padding: 7px 10px;
   border-radius: 8px;
+}
+
+.switcher-card {
+  width: min(560px, calc(100vw - 32px));
+}
+
+.switcher-list {
+  display: grid;
+  gap: 8px;
+  max-height: min(52vh, 420px);
+  overflow: auto;
+}
+
+.switcher-row {
+  width: 100%;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 16px;
+  padding: 12px 14px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--surface);
+  text-align: left;
+}
+
+.switcher-row.active {
+  border-color: color-mix(in srgb, var(--accent) 35%, var(--line));
+  background: #fff4ef;
+}
+
+.switcher-row span {
+  color: var(--muted);
+  font-size: 0.86rem;
 }
 
 .markdown-display {

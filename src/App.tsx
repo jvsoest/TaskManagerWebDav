@@ -208,6 +208,15 @@ function browserOffline(): boolean {
   return typeof navigator !== 'undefined' && navigator.onLine === false
 }
 
+function isEditableTarget(target: EventTarget | null): boolean {
+  const element = target instanceof HTMLElement ? target : null
+  if (!element) {
+    return false
+  }
+
+  return Boolean(element.closest('input, textarea, select, [contenteditable="true"]'))
+}
+
 function normalizeDateInput(value?: string): string {
   if (!value) {
     return ''
@@ -425,15 +434,31 @@ function App() {
   const [renameCollectionValue, setRenameCollectionValue] = useState('')
   const [colorPickerCollectionId, setColorPickerCollectionId] = useState<string>()
   const [descriptionMode, setDescriptionMode] = useState<DescriptionMode>('edit')
+  const [keyboardSelectedTaskId, setKeyboardSelectedTaskId] = useState<string>()
+  const [isQuickSwitcherOpen, setIsQuickSwitcherOpen] = useState(false)
+  const [quickSwitcherQuery, setQuickSwitcherQuery] = useState('')
+  const [quickSwitcherIndex, setQuickSwitcherIndex] = useState(0)
   const deliveredRef = useRef<Set<string>>(new Set())
   const taskRowsRef = useRef<Map<string, HTMLDivElement>>(new Map())
   const settingsRowsRef = useRef<Map<string, HTMLDivElement>>(new Map())
   const titleInputRef = useRef<HTMLInputElement>(null)
+  const searchInputRef = useRef<HTMLInputElement>(null)
+  const quickSwitcherInputRef = useRef<HTMLInputElement>(null)
   const suppressTaskClickRef = useRef(false)
   const snapshotRef = useRef<AppSnapshot>(emptySnapshot)
   const syncInFlightRef = useRef<Set<string>>(new Set())
   const autoSyncedAccountIdsRef = useRef<Set<string>>(new Set())
   const syncRunnerRef = useRef<(accountId?: string) => void>(() => {})
+  const shortcutPrefixRef = useRef<{ key: string; timeoutId: number }>()
+  const actionRefs = useRef<{
+    beginNewTask: () => void
+    saveTask: () => Promise<void>
+    toggleTaskStatus: (task: TaskItem) => Promise<void>
+  }>({
+    beginNewTask: () => {},
+    saveTask: () => Promise.resolve(),
+    toggleTaskStatus: () => Promise.resolve(),
+  })
   const deferredSearch = useDeferredValue(searchText)
 
   useEffect(() => {
@@ -509,6 +534,21 @@ function App() {
 
     return orderedSmartLists.filter((smartList) => smartList.id !== settingsDragSession.itemId)
   }, [orderedSmartLists, settingsDragSession])
+  const navigationItems = useMemo(
+    () => [
+      ...orderedSmartLists.map((smartList) => ({
+        kind: 'smart' as const,
+        id: smartList.id,
+        label: smartList.name,
+      })),
+      ...orderedTaskCollections.map((collection) => ({
+        kind: 'collection' as const,
+        id: collection.id,
+        label: collection.displayName,
+      })),
+    ],
+    [orderedSmartLists, orderedTaskCollections],
+  )
   const preferredTaskCollectionId =
     activeView?.kind === 'collection'
       ? activeView.collectionId
@@ -518,6 +558,11 @@ function App() {
     [activeTasks],
   )
   const activeViewKey = activeView?.kind === 'collection'
+    ? `collection:${activeView.collectionId}`
+    : activeView?.kind === 'smart'
+      ? `smart:${activeView.smartListId}`
+      : undefined
+  const activeNavigationKey = activeView?.kind === 'collection'
     ? `collection:${activeView.collectionId}`
     : activeView?.kind === 'smart'
       ? `smart:${activeView.smartListId}`
@@ -662,6 +707,23 @@ function App() {
   }, [isEditorMode, taskDraft.id])
 
   useEffect(() => {
+    if (!isQuickSwitcherOpen) {
+      setQuickSwitcherQuery('')
+      setQuickSwitcherIndex(0)
+      return
+    }
+
+    window.requestAnimationFrame(() => {
+      quickSwitcherInputRef.current?.focus()
+      quickSwitcherInputRef.current?.select()
+    })
+  }, [isQuickSwitcherOpen])
+
+  useEffect(() => {
+    setQuickSwitcherIndex(0)
+  }, [quickSwitcherQuery])
+
+  useEffect(() => {
     const interval = window.setInterval(() => {
       const tasks = snapshot.tasks.filter((task) => task.accountId === activeAccountId)
       notifyDueTasks(tasks, deliveredRef.current)
@@ -772,6 +834,148 @@ function App() {
     settingsDragSession?.kind === 'smart'
       ? orderedSmartLists.find((smartList) => smartList.id === settingsDragSession.itemId)
       : undefined
+  const filteredNavigationItems = useMemo(() => {
+    const query = quickSwitcherQuery.trim().toLowerCase()
+    if (!query) {
+      return navigationItems
+    }
+
+    return navigationItems.filter((item) => item.label.toLowerCase().includes(query))
+  }, [navigationItems, quickSwitcherQuery])
+
+  useEffect(() => {
+    if (visibleTasks.length === 0) {
+      setKeyboardSelectedTaskId(undefined)
+      return
+    }
+
+    setKeyboardSelectedTaskId((current) =>
+      current && visibleTasks.some((task) => task.id === current) ? current : visibleTasks[0].id,
+    )
+  }, [activeViewKey, deferredSearch, selectedViewTags, visibleTasks])
+
+  useEffect(() => {
+    function handleGlobalKeyDown(event: KeyboardEvent) {
+      if (event.defaultPrevented) {
+        return
+      }
+
+      if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 's') {
+        if (isEditorMode) {
+          event.preventDefault()
+          void actionRefs.current.saveTask()
+        }
+        return
+      }
+
+      if (isQuickSwitcherOpen) {
+        if (event.key === 'Escape') {
+          event.preventDefault()
+          setIsQuickSwitcherOpen(false)
+        }
+        return
+      }
+
+      if (isEditableTarget(event.target)) {
+        return
+      }
+
+      if (event.key === '/') {
+        event.preventDefault()
+        searchInputRef.current?.focus()
+        searchInputRef.current?.select()
+        return
+      }
+
+      if (!event.metaKey && !event.ctrlKey && !event.altKey) {
+        if (shortcutPrefixRef.current?.key === 'g') {
+          window.clearTimeout(shortcutPrefixRef.current.timeoutId)
+          const isListSwitcher = event.key.toLowerCase() === 'l'
+          shortcutPrefixRef.current = undefined
+          if (isListSwitcher) {
+            event.preventDefault()
+            setIsQuickSwitcherOpen(true)
+            return
+          }
+        }
+
+        if (event.key.toLowerCase() === 'g') {
+          event.preventDefault()
+          if (shortcutPrefixRef.current) {
+            window.clearTimeout(shortcutPrefixRef.current.timeoutId)
+          }
+          shortcutPrefixRef.current = {
+            key: 'g',
+            timeoutId: window.setTimeout(() => {
+              shortcutPrefixRef.current = undefined
+            }, 1000),
+          }
+          return
+        }
+      }
+
+      if (!event.metaKey && !event.ctrlKey && !event.altKey && event.key.toLowerCase() === 'q') {
+        event.preventDefault()
+        actionRefs.current.beginNewTask()
+        return
+      }
+
+      if (!event.metaKey && !event.ctrlKey && !event.altKey && (event.key === '[' || event.key === ']')) {
+        if (navigationItems.length === 0) {
+          return
+        }
+
+        event.preventDefault()
+        const currentIndex = navigationItems.findIndex((item) => `${item.kind}:${item.id}` === activeNavigationKey)
+        const baseIndex = currentIndex >= 0 ? currentIndex : 0
+        const delta = event.key === ']' ? 1 : -1
+        const nextIndex = (baseIndex + delta + navigationItems.length) % navigationItems.length
+        activateNavigationItem(navigationItems[nextIndex])
+        return
+      }
+
+      if (isSettingsMode || isEditorMode || visibleTasks.length === 0) {
+        return
+      }
+
+      if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
+        event.preventDefault()
+        const currentIndex = visibleTasks.findIndex((task) => task.id === keyboardSelectedTaskId)
+        const baseIndex = currentIndex >= 0 ? currentIndex : 0
+        const nextIndex =
+          event.key === 'ArrowDown'
+            ? Math.min(baseIndex + 1, visibleTasks.length - 1)
+            : Math.max(baseIndex - 1, 0)
+        setKeyboardSelectedTaskId(visibleTasks[nextIndex]?.id)
+        return
+      }
+
+      if (event.key === 'Enter' && keyboardSelectedTaskId) {
+        event.preventDefault()
+        openTask(keyboardSelectedTaskId)
+        return
+      }
+
+      if (event.key === ' ' && keyboardSelectedTaskId) {
+        event.preventDefault()
+        const task = visibleTasks.find((entry) => entry.id === keyboardSelectedTaskId)
+        if (task) {
+          void actionRefs.current.toggleTaskStatus(task)
+        }
+      }
+    }
+
+    window.addEventListener('keydown', handleGlobalKeyDown)
+    return () => window.removeEventListener('keydown', handleGlobalKeyDown)
+  }, [
+    activeNavigationKey,
+    isEditorMode,
+    isQuickSwitcherOpen,
+    isSettingsMode,
+    keyboardSelectedTaskId,
+    navigationItems,
+    visibleTasks,
+  ])
 
   const collectionSections = useMemo(() => {
     const roots = collectionTreeNodes.filter((collection) => !collection.parentId)
@@ -915,6 +1119,7 @@ function App() {
     setSelectedTaskId(taskId)
     setIsCreatingTask(false)
     setIsSidebarOpen(false)
+    setKeyboardSelectedTaskId(taskId)
   }
 
   function closeEditor() {
@@ -924,12 +1129,27 @@ function App() {
     setDescriptionMode('edit')
   }
 
+  function activateNavigationItem(item: { kind: 'collection' | 'smart'; id: string }) {
+    setWorkspaceMode('tasks')
+    setSelectedTaskId(undefined)
+    setIsCreatingTask(false)
+    setIsSidebarOpen(false)
+
+    if (item.kind === 'collection') {
+      setActiveView({ kind: 'collection', collectionId: item.id })
+      setCollectionViewScope('self')
+    } else {
+      setActiveView({ kind: 'smart', smartListId: item.id })
+    }
+  }
+
   function beginNewTask() {
     setWorkspaceMode('tasks')
     setSelectedTaskId(undefined)
     setIsCreatingTask(true)
     setDescriptionMode('edit')
     setTaskDraft(createDraft(preferredTaskCollectionId, activeAccountId))
+    setIsQuickSwitcherOpen(false)
   }
 
   function openSettings(section: SettingsSection = 'accounts') {
@@ -2404,6 +2624,10 @@ function App() {
     )
   }
 
+  actionRefs.current.beginNewTask = beginNewTask
+  actionRefs.current.saveTask = handleSaveTask
+  actionRefs.current.toggleTaskStatus = handleToggleTaskStatus
+
   return (
     <div className="todoist-shell">
       <aside className={`todoist-sidebar ${isSidebarOpen ? 'open' : ''}`}>
@@ -2419,6 +2643,7 @@ function App() {
 
         <div className="sidebar-search">
           <input
+            ref={searchInputRef}
             value={searchText}
             onChange={(event) => setSearchText(event.target.value)}
             placeholder="Search"
@@ -2956,12 +3181,15 @@ function App() {
                       <div
                         className={`task-row ${task.id === selectedTaskId ? 'selected' : ''} ${
                           task.status === 'completed' ? 'done' : ''
-                        } ${canManualReorderTasks && task.status !== 'completed' ? 'reorderable' : ''}`}
+                        } ${canManualReorderTasks && task.status !== 'completed' ? 'reorderable' : ''} ${
+                          keyboardSelectedTaskId === task.id ? 'keyboard-selected' : ''
+                        }`}
                         onClick={() => {
                           if (suppressTaskClickRef.current) {
                             suppressTaskClickRef.current = false
                             return
                           }
+                          setKeyboardSelectedTaskId(task.id)
                           openTask(task.id)
                         }}
                       >
@@ -3025,14 +3253,22 @@ function App() {
                     }
                   }}
                 >
-                  <div className={`task-row ${task.id === selectedTaskId ? 'selected' : ''} done`}>
+                  <div className={`task-row ${task.id === selectedTaskId ? 'selected' : ''} done ${
+                    keyboardSelectedTaskId === task.id ? 'keyboard-selected' : ''
+                  }`}>
                     <button
                       className={`task-check ${task.status === 'completed' ? 'checked' : ''}`}
                       onClick={() => void handleToggleTaskStatus(task)}
                     >
                       {task.status === 'completed' ? 'x' : ''}
                     </button>
-                    <button className="task-main" onClick={() => openTask(task.id)}>
+                    <button
+                      className="task-main"
+                      onClick={() => {
+                        setKeyboardSelectedTaskId(task.id)
+                        openTask(task.id)
+                      }}
+                    >
                       <span className="task-title">{task.title || 'Untitled task'}</span>
                       {task.tagIds.length > 0 && (
                         <span className="task-tag-row">
@@ -3301,6 +3537,76 @@ function App() {
           <span>{message}</span>
           {activeAccount && <span>{activeAccount.lastError ?? syncLabel(activeAccount.lastSyncAt)}</span>}
         </footer>
+
+        {isQuickSwitcherOpen && (
+          <div className="modal-shell" role="dialog" aria-modal="true">
+            <button className="modal-backdrop" onClick={() => setIsQuickSwitcherOpen(false)} />
+            <div className="modal-card switcher-card">
+              <div className="modal-header">
+                <div>
+                  <p>Navigate</p>
+                  <h3>Open list or smart list</h3>
+                </div>
+                <button className="ghost-icon" onClick={() => setIsQuickSwitcherOpen(false)}>
+                  x
+                </button>
+              </div>
+
+              <div className="settings-form">
+                <input
+                  ref={quickSwitcherInputRef}
+                  value={quickSwitcherQuery}
+                  onChange={(event) => setQuickSwitcherQuery(event.target.value)}
+                  placeholder="Type a list name"
+                  onKeyDown={(event) => {
+                    if (event.key === 'ArrowDown') {
+                      event.preventDefault()
+                      setQuickSwitcherIndex((current) =>
+                        Math.min(current + 1, Math.max(filteredNavigationItems.length - 1, 0)),
+                      )
+                    } else if (event.key === 'ArrowUp') {
+                      event.preventDefault()
+                      setQuickSwitcherIndex((current) => Math.max(current - 1, 0))
+                    } else if (event.key === 'Enter') {
+                      event.preventDefault()
+                      const item = filteredNavigationItems[quickSwitcherIndex]
+                      if (item) {
+                        activateNavigationItem(item)
+                        setIsQuickSwitcherOpen(false)
+                      }
+                    } else if (event.key === 'Escape') {
+                      event.preventDefault()
+                      setIsQuickSwitcherOpen(false)
+                    }
+                  }}
+                />
+                <div className="switcher-list">
+                  {filteredNavigationItems.length === 0 ? (
+                    <div className="empty-state">
+                      <strong>No matching views.</strong>
+                      <span>Try another name.</span>
+                    </div>
+                  ) : (
+                    filteredNavigationItems.map((item, index) => (
+                      <button
+                        key={`${item.kind}:${item.id}`}
+                        className={`switcher-row ${index === quickSwitcherIndex ? 'active' : ''}`}
+                        onMouseEnter={() => setQuickSwitcherIndex(index)}
+                        onClick={() => {
+                          activateNavigationItem(item)
+                          setIsQuickSwitcherOpen(false)
+                        }}
+                      >
+                        <strong>{item.label}</strong>
+                        <span>{item.kind === 'smart' ? 'Smart list' : 'List'}</span>
+                      </button>
+                    ))
+                  )}
+                </div>
+              </div>
+            </div>
+          </div>
+        )}
 
         {settingsDragSession && (draggedSettingsCollection || draggedSettingsSmartList) && (
           <div

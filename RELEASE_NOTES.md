@@ -31,6 +31,11 @@
 - The task editor now autofocuses the title field, and pressing `Enter` in the title saves the task and returns to the list view.
 - New tasks now default to the currently selected regular list, or to the first regular list in UI order when the current view is a smart list.
 
+### Keyboard shortcuts
+- Added `q` for new task creation, `ArrowUp` / `ArrowDown` for task-list navigation, `Enter` to open the selected task, and `Space` to toggle completion.
+- Added `Ctrl/Cmd+S` to save from the task editor and `/` to focus search.
+- Added keyboard navigation between smart lists and lists with `g l` for a searchable quick switcher and `[` / `]` for previous/next view navigation in sidebar order.
+
 ### Verification
 - `npm run build`
 - `npm run lint`
