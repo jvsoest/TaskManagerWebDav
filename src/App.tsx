@@ -17,7 +17,7 @@ import {
   validateSmartListDefinition,
 } from './lib/filters'
 import { clearLocalCache, loadSnapshot, saveSnapshot } from './lib/idb'
-import { notifyDueTasks, requestNotifications } from './lib/notifications'
+import { notifyDueTasks } from './lib/notifications'
 import {
   createTaskCollection,
   deleteTaskCollection,
@@ -407,7 +407,6 @@ function App() {
   const [smartDraftOrdering, setSmartDraftOrdering] = useState<TaskOrdering>(defaultSmartListOrdering())
   const [searchText, setSearchText] = useState('')
   const [selectedViewTags, setSelectedViewTags] = useState<string[]>([])
-  const [quickAddTitle, setQuickAddTitle] = useState('')
   const [busy, setBusy] = useState(false)
   const [message, setMessage] = useState('Connect a CalDAV account to start syncing tasks.')
   const [isCreatingTask, setIsCreatingTask] = useState(false)
@@ -429,6 +428,7 @@ function App() {
   const deliveredRef = useRef<Set<string>>(new Set())
   const taskRowsRef = useRef<Map<string, HTMLDivElement>>(new Map())
   const settingsRowsRef = useRef<Map<string, HTMLDivElement>>(new Map())
+  const titleInputRef = useRef<HTMLInputElement>(null)
   const suppressTaskClickRef = useRef(false)
   const snapshotRef = useRef<AppSnapshot>(emptySnapshot)
   const syncInFlightRef = useRef<Set<string>>(new Set())
@@ -645,6 +645,18 @@ function App() {
     setTaskDraft((current) => (sameTaskDraft(current, nextDraft) ? current : nextDraft))
     setDescriptionMode(defaultDescriptionMode(nextDraft.notes))
   }, [activeAccountId, defaultCollectionId, isCreatingTask, selectedTaskId, snapshot.tasks])
+
+  useEffect(() => {
+    if (!isEditorMode) {
+      return
+    }
+
+    window.requestAnimationFrame(() => {
+      titleInputRef.current?.focus()
+      const valueLength = titleInputRef.current?.value.length ?? 0
+      titleInputRef.current?.setSelectionRange(valueLength, valueLength)
+    })
+  }, [isEditorMode, taskDraft.id])
 
   useEffect(() => {
     const interval = window.setInterval(() => {
@@ -909,15 +921,12 @@ function App() {
     setDescriptionMode('edit')
   }
 
-  function beginNewTask(prefill = '') {
+  function beginNewTask() {
     setWorkspaceMode('tasks')
     setSelectedTaskId(undefined)
     setIsCreatingTask(true)
     setDescriptionMode('edit')
-    setTaskDraft({
-      ...createDraft(defaultCollectionId, activeAccountId),
-      title: prefill,
-    })
+    setTaskDraft(createDraft(defaultCollectionId, activeAccountId))
   }
 
   function openSettings(section: SettingsSection = 'accounts') {
@@ -2089,20 +2098,6 @@ function App() {
     }
   }
 
-  async function handleNotifications() {
-    const permission = await requestNotifications()
-    if (permission === 'unsupported') {
-      setMessage('Notifications are not supported in this browser.')
-      return
-    }
-
-    setMessage(
-      permission === 'granted'
-        ? 'Notifications enabled. Reminders fire while the PWA is active.'
-        : 'Notification permission was not granted.',
-    )
-  }
-
   async function handleClearLocalCache() {
     setBusy(true)
     setMessage('Clearing local cache...')
@@ -2125,7 +2120,6 @@ function App() {
       setSmartDraftName('')
       setSmartDraftDefinition('')
       setSearchText('')
-      setQuickAddTitle('')
       setCollapsedCollections([])
       setConnectionForm(emptyConnection)
       setListDraft({ name: '', parentId: '' })
@@ -2136,102 +2130,6 @@ function App() {
       setMessage(error instanceof Error ? error.message : 'Failed to clear local cache.')
     } finally {
       setBusy(false)
-    }
-  }
-
-  async function handleQuickAdd() {
-    if (!activeAccount || !metadataDoc || taskCollections.length === 0) {
-      setMessage('Connect an account with at least one task list before adding tasks.')
-      return
-    }
-
-    if (!quickAddTitle.trim()) {
-      beginNewTask()
-      return
-    }
-
-    const targetCollection =
-      activeView?.kind === 'collection'
-        ? taskCollections.find((collection) => collection.id === activeView.collectionId) ?? taskCollections[0]
-        : taskCollections[0]
-    const now = new Date().toISOString()
-    const nextTask: TaskItem = {
-      id: newId(),
-      uid: newId().replace(/-/g, ''),
-      accountId: activeAccount.id,
-      collectionId: targetCollection.id,
-      title: quickAddTitle.trim(),
-      notes: '',
-      status: 'needs-action',
-      priority: 0,
-      tagIds: extractHashtags(quickAddTitle.trim()),
-      createdAt: now,
-      updatedAt: now,
-      syncState: 'syncing',
-    }
-
-    setQuickAddTitle('')
-    setMessage(`Saving ${nextTask.title}...`)
-
-    if (browserOffline()) {
-      const queuedTask = { ...nextTask, syncState: 'error' as const }
-      replaceSnapshotWith((current) => ({
-        ...current,
-        tasks: [
-          ...current.tasks.filter((task) => task.id !== nextTask.id),
-          queuedTask,
-        ],
-      }))
-      queueTaskMutation('upsert', queuedTask, targetCollection.id)
-      setMessage('Task added locally. It will sync when you are back online.')
-      return
-    }
-
-    try {
-      replaceSnapshotWith((current) => ({
-        ...current,
-        tasks: [...current.tasks.filter((task) => task.id !== nextTask.id), nextTask],
-      }))
-      const remote = await upsertTaskRemote(activeAccount, targetCollection, nextTask)
-      replaceSnapshotWith((current) => ({
-        ...current,
-        tasks: [
-          ...current.tasks.filter((task) => task.id !== nextTask.id),
-          { ...nextTask, url: remote.url, etag: remote.etag, syncState: 'synced' },
-        ],
-        queuedMutations: current.queuedMutations.filter((entry) => entry.task.id !== nextTask.id),
-      }))
-      const nextMetadataDoc = withTaskPosition(metadataDoc, nextTask)
-      const metadataChanged =
-        JSON.stringify(nextMetadataDoc.manualTaskOrder) !== JSON.stringify(metadataDoc.manualTaskOrder)
-      if (metadataChanged) {
-        await saveMetadata(
-          {
-            ...nextMetadataDoc,
-            updatedAt: new Date().toISOString(),
-          },
-          'Task added.',
-        )
-      } else {
-        setMessage('Task added.')
-      }
-    } catch (error) {
-      const queuedTask = { ...nextTask, syncState: 'error' as const }
-      replaceSnapshotWith((current) => ({
-        ...current,
-        tasks: [
-          ...current.tasks.filter((task) => task.id !== nextTask.id),
-          queuedTask,
-        ],
-      }))
-      if (isRetryableTaskMutationError(error)) {
-        queueTaskMutation('upsert', queuedTask, targetCollection.id)
-        setMessage('Task added locally. It will sync when the connection is available again.')
-        return
-      }
-      const failure = error instanceof Error ? error.message : 'Quick add failed.'
-      recordSyncIssue('Quick add', failure, activeAccount.id)
-      setMessage(failure)
     }
   }
 
@@ -2516,10 +2414,6 @@ function App() {
           </button>
         </div>
 
-        <button className="sidebar-add" onClick={() => beginNewTask()} disabled={!activeAccount}>
-          + Add task
-        </button>
-
         <div className="sidebar-search">
           <input
             value={searchText}
@@ -2614,41 +2508,22 @@ function App() {
             </button>
             <div>
               <p>{activeAccount ? activeAccount.displayName || activeAccount.label : 'No connected account'}</p>
-              <h2>
-                {isSettingsMode
-                  ? 'Settings'
-                  : isEditorMode
-                    ? (taskDraft.id ? 'Edit task' : 'New task')
-                    : currentViewTitle}
-              </h2>
+              <div className="workspace-title-row">
+                <h2>
+                  {isSettingsMode
+                    ? 'Settings'
+                    : isEditorMode
+                      ? (taskDraft.id ? 'Edit task' : 'New task')
+                      : currentViewTitle}
+                </h2>
+                {!isSettingsMode && !isEditorMode && (
+                  <button className="quick-add-trigger" onClick={() => beginNewTask()} disabled={!activeAccount}>
+                    +
+                  </button>
+                )}
+              </div>
             </div>
           </div>
-          {!isSettingsMode ? (
-            <div className="workspace-actions">
-              <button className="ghost-button" onClick={() => void handleNotifications()}>
-                Reminders
-              </button>
-              <button className="ghost-button" onClick={() => openSettings('accounts')}>
-                Settings
-              </button>
-              <button
-                className="ghost-button"
-                onClick={() => {
-                  setSmartDraftId(undefined)
-                  setSmartDraftName('')
-                  setSmartDraftDefinition('')
-                  setSmartDraftOrdering(defaultSmartListOrdering())
-                  setIsSmartEditorOpen(true)
-                }}
-                disabled={!activeAccount}
-              >
-                Smart list
-              </button>
-              <button className="primary-button" onClick={() => void handleSyncAccount()} disabled={!activeAccount || busy}>
-                {busy ? 'Working...' : 'Sync'}
-              </button>
-            </div>
-          ) : null}
         </header>
 
         {isSettingsMode ? (
@@ -3010,7 +2885,6 @@ function App() {
           <section className="workspace-surface">
             <div className="list-header">
               <div>
-                <h3>{currentViewTitle}</h3>
                 <p>{visibleTasks.length} tasks</p>
               </div>
               {activeView?.kind === 'collection' && (
@@ -3048,25 +2922,6 @@ function App() {
                 ))}
               </div>
             )}
-
-            <div className="quick-add-row">
-              <button className="quick-add-trigger" onClick={() => handleQuickAdd()} disabled={!activeAccount}>
-                +
-              </button>
-              <input
-                value={quickAddTitle}
-                onChange={(event) => setQuickAddTitle(event.target.value)}
-                placeholder="Add task"
-                onKeyDown={(event) => {
-                  if (event.key === 'Enter') {
-                    handleQuickAdd()
-                  }
-                }}
-              />
-              <button className="ghost-button" onClick={() => beginNewTask(quickAddTitle.trim())} disabled={!activeAccount}>
-                Open editor
-              </button>
-            </div>
 
             <div className="task-rows">
               {visibleTasks.length === 0 && (
@@ -3254,9 +3109,16 @@ function App() {
 
             <div className="editor-body">
               <input
+                ref={titleInputRef}
                 className="editor-title"
                 value={taskDraft.title}
                 onChange={(event) => setTaskDraft((current) => ({ ...current, title: event.target.value }))}
+                onKeyDown={(event) => {
+                  if (event.key === 'Enter') {
+                    event.preventDefault()
+                    void handleSaveTask()
+                  }
+                }}
                 placeholder="Task name"
               />
 

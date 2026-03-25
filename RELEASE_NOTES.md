@@ -18,11 +18,17 @@
 - Moved `Sync` and `Settings` actions into the sidebar footer so they stay reachable on phones.
 - Selecting a list or smart list now returns from settings to the task view on mobile.
 - Moved `Back to tasks` from the settings header into the sidebar footer so it stays visible on narrow mobile screens.
+- Removed the redundant top-bar action buttons and made the top bar the single location for the current list title and task-creation `+` button.
 - Fixed phone task-row metadata alignment so the project/list name aligns correctly.
 
 ### Sidebar and settings
 - Added auto-sync controls to the settings page.
 - Made the sidebar navigation scroll independently when many lists are present.
+
+### Task creation and editor flow
+- Removed the inline quick-add row and the sidebar add-task button.
+- Added a single `+` action next to the current list or smart-list title to open the task editor.
+- The task editor now autofocuses the title field, and pressing `Enter` in the title saves the task and returns to the list view.
 
 ### Verification
 - `npm run build`

@@ -88,14 +88,12 @@ button {
 
 .sidebar-top h1,
 .workspace-title h2,
-.list-header h3,
 .modal-header h3 {
   margin: 2px 0 0;
   font-size: 1.12rem;
   line-height: 1.2;
 }
 
-.sidebar-add,
 .primary-button {
   border: 0;
   border-radius: 8px;
@@ -103,16 +101,7 @@ button {
   color: #fff;
 }
 
-.sidebar-add {
-  padding: 10px 12px;
-  text-align: left;
-  font-weight: 600;
-  font-size: 0.9rem;
-  box-shadow: 0 1px 0 rgba(255, 255, 255, 0.35) inset;
-}
-
 .sidebar-search input,
-.quick-add-row input,
 .editor-title,
 .editor-notes,
 .settings-form input,
@@ -127,7 +116,6 @@ button {
 }
 
 .sidebar-search input,
-.quick-add-row input,
 .settings-form input,
 .settings-form select,
 .editor-chipfield input,
@@ -455,10 +443,16 @@ button {
   padding: 24px 28px;
 }
 
+.workspace-title-row {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+}
+
 .list-header {
   display: flex;
   justify-content: space-between;
-  align-items: center;
+  align-items: flex-end;
   gap: 16px;
   margin-bottom: 20px;
 }
@@ -495,18 +489,6 @@ button {
   align-items: center;
   gap: 8px;
   color: var(--muted);
-}
-
-.quick-add-row {
-  display: grid;
-  grid-template-columns: auto minmax(0, 1fr) auto;
-  gap: 10px;
-  align-items: center;
-  padding: 12px 14px;
-  margin-bottom: 16px;
-  border: 1px solid var(--line);
-  border-radius: 10px;
-  background: var(--surface);
 }
 
 .quick-add-trigger {
