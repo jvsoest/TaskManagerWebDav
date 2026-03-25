@@ -16,6 +16,7 @@
 ### Mobile and navigation
 - Moved `Sync` and `Settings` actions into the sidebar footer so they stay reachable on phones.
 - Selecting a list or smart list now returns from settings to the task view on mobile.
+- Moved `Back to tasks` from the settings header into the sidebar footer so it stays visible on narrow mobile screens.
 - Fixed phone task-row metadata alignment so the project/list name aligns correctly.
 
 ### Sidebar and settings

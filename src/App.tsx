@@ -2581,9 +2581,15 @@ function App() {
 
         <div className="sidebar-footer">
           <div className="sidebar-footer-actions">
-            <button className="ghost-button" onClick={() => openSettings('accounts')}>
-              Settings
-            </button>
+            {isSettingsMode ? (
+              <button className="ghost-button" onClick={closeSettings}>
+                Back to tasks
+              </button>
+            ) : (
+              <button className="ghost-button" onClick={() => openSettings('accounts')}>
+                Settings
+              </button>
+            )}
             <button className="primary-button" onClick={() => void handleSyncAccount()} disabled={!activeAccount || busy}>
               {busy ? 'Working...' : 'Sync'}
             </button>
@@ -2617,13 +2623,7 @@ function App() {
               </h2>
             </div>
           </div>
-          {isSettingsMode ? (
-            <div className="workspace-actions">
-              <button className="ghost-button" onClick={closeSettings}>
-                Back to tasks
-              </button>
-            </div>
-          ) : (
+          {!isSettingsMode ? (
             <div className="workspace-actions">
               <button className="ghost-button" onClick={() => void handleNotifications()}>
                 Reminders
@@ -2648,7 +2648,7 @@ function App() {
                 {busy ? 'Working...' : 'Sync'}
               </button>
             </div>
-          )}
+          ) : null}
         </header>
 
         {isSettingsMode ? (
