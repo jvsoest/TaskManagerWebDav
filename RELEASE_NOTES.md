@@ -8,6 +8,7 @@
 - Added immediate sync when the browser comes back online.
 - Added a persisted local task-mutation queue so offline task creates, edits, and deletes are replayed after reconnecting.
 - Preserved proxy-mode compatibility for queued task replay.
+- Improved offline task saves so retryable network/proxy failures are treated as queued local saves, the editor returns to the list view, and sync replay picks those entries up correctly.
 
 ### Smart lists and data integrity
 - Fixed smart-list editing so saving an existing smart list updates it in place instead of creating duplicates.

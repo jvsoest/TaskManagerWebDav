@@ -204,6 +204,10 @@ function enqueueTaskMutation(
   return [...deduped, nextMutation]
 }
 
+function browserOffline(): boolean {
+  return typeof navigator !== 'undefined' && navigator.onLine === false
+}
+
 function normalizeDateInput(value?: string): string {
   if (!value) {
     return ''
@@ -1326,6 +1330,17 @@ function App() {
 
     setMessage(`Saving ${nextTask.title || 'task'}...`)
 
+    if (browserOffline()) {
+      replaceSnapshotWith((current) => ({
+        ...current,
+        tasks: [...current.tasks.filter((task) => task.id !== nextTask.id), { ...nextTask, syncState: 'error' }],
+      }))
+      queueTaskMutation('upsert', { ...nextTask, syncState: 'error' }, targetCollection.id)
+      closeEditor()
+      setMessage('Task saved locally. It will sync when you are back online.')
+      return
+    }
+
     try {
       replaceSnapshotWith((current) => ({
         ...current,
@@ -1370,6 +1385,9 @@ function App() {
       }))
       if (isRetryableTaskMutationError(error)) {
         queueTaskMutation('upsert', queuedTask, targetCollection.id)
+        closeEditor()
+        setMessage('Task saved locally. It will sync when the connection is available again.')
+        return
       }
       const failure = error instanceof Error ? error.message : 'Task save failed.'
       recordSyncIssue('Task save', failure, activeAccount.id)
@@ -1400,6 +1418,17 @@ function App() {
       tasks: [...snapshot.tasks.filter((entry) => entry.id !== task.id), updatedTask],
     })
 
+    if (browserOffline()) {
+      const queuedTask = { ...updatedTask, syncState: 'error' as const }
+      replaceSnapshotWith((current) => ({
+        ...current,
+        tasks: [...current.tasks.filter((entry) => entry.id !== task.id), queuedTask],
+      }))
+      queueTaskMutation('upsert', queuedTask, targetCollection.id)
+      setMessage('Task update saved locally. It will sync when you are back online.')
+      return
+    }
+
     try {
       const remote = await upsertTaskRemote(activeAccount, targetCollection, updatedTask)
       replaceSnapshotWith((current) => ({
@@ -1428,6 +1457,8 @@ function App() {
       }))
       if (isRetryableTaskMutationError(error)) {
         queueTaskMutation('upsert', queuedTask, targetCollection.id)
+        setMessage('Task update saved locally. It will sync when the connection is available again.')
+        return
       }
       const failure = error instanceof Error ? error.message : 'Task update failed.'
       recordSyncIssue('Task update', failure, activeAccount.id)
@@ -1450,6 +1481,12 @@ function App() {
       tasks: snapshot.tasks.filter((task) => task.id !== existing.id),
     })
     closeEditor()
+
+    if (browserOffline()) {
+      queueTaskMutation('delete', existing, existing.collectionId)
+      setMessage('Task deletion saved locally. It will sync when you are back online.')
+      return
+    }
 
     try {
       await deleteTaskRemote(activeAccount, existing)
@@ -1479,6 +1516,8 @@ function App() {
     } catch (error) {
       if (isRetryableTaskMutationError(error)) {
         queueTaskMutation('delete', existing, existing.collectionId)
+        setMessage('Task deletion saved locally. It will sync when the connection is available again.')
+        return
       } else {
         replaceSnapshotWith((current) => ({
           ...current,
@@ -2134,6 +2173,20 @@ function App() {
     setQuickAddTitle('')
     setMessage(`Saving ${nextTask.title}...`)
 
+    if (browserOffline()) {
+      const queuedTask = { ...nextTask, syncState: 'error' as const }
+      replaceSnapshotWith((current) => ({
+        ...current,
+        tasks: [
+          ...current.tasks.filter((task) => task.id !== nextTask.id),
+          queuedTask,
+        ],
+      }))
+      queueTaskMutation('upsert', queuedTask, targetCollection.id)
+      setMessage('Task added locally. It will sync when you are back online.')
+      return
+    }
+
     try {
       replaceSnapshotWith((current) => ({
         ...current,
@@ -2173,6 +2226,8 @@ function App() {
       }))
       if (isRetryableTaskMutationError(error)) {
         queueTaskMutation('upsert', queuedTask, targetCollection.id)
+        setMessage('Task added locally. It will sync when the connection is available again.')
+        return
       }
       const failure = error instanceof Error ? error.message : 'Quick add failed.'
       recordSyncIssue('Quick add', failure, activeAccount.id)
