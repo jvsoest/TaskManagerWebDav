@@ -1,9 +1,9 @@
 import type { Account, AppSnapshot } from '../types'
 
 const DB_NAME = 'taskmanager-webdav'
-const DB_VERSION = 2
+const DB_VERSION = 3
 
-const STORES = ['accounts', 'collections', 'tasks', 'smartLists', 'metadataDocs', 'syncLogs'] as const
+const STORES = ['accounts', 'collections', 'tasks', 'smartLists', 'metadataDocs', 'syncLogs', 'settings', 'queuedMutations'] as const
 
 let openPromise: Promise<IDBDatabase> | undefined
 
@@ -35,6 +35,12 @@ function openDb(): Promise<IDBDatabase> {
       if (!database.objectStoreNames.contains('syncLogs')) {
         database.createObjectStore('syncLogs', { keyPath: 'id' })
       }
+      if (!database.objectStoreNames.contains('settings')) {
+        database.createObjectStore('settings', { keyPath: 'id' })
+      }
+      if (!database.objectStoreNames.contains('queuedMutations')) {
+        database.createObjectStore('queuedMutations', { keyPath: 'id' })
+      }
     }
 
     request.onsuccess = () => resolve(request.result)
@@ -61,7 +67,7 @@ function wrapTransaction(transaction: IDBTransaction): Promise<void> {
 
 export async function loadSnapshot(): Promise<AppSnapshot> {
   const db = await openDb()
-  const [accounts, collections, tasks, smartLists, metadataDocs, syncLogs] = await Promise.all(
+  const [accounts, collections, tasks, smartLists, metadataDocs, syncLogs, settings, queuedMutations] = await Promise.all(
     STORES.map((storeName) =>
       wrapRequest(db.transaction(storeName, 'readonly').objectStore(storeName).getAll()),
     ),
@@ -78,6 +84,18 @@ export async function loadSnapshot(): Promise<AppSnapshot> {
     smartLists,
     metadataDocs,
     syncLogs,
+    settings: (settings as Array<{ id: string; autoSyncEnabled?: boolean; autoSyncIntervalMinutes?: number }>)[0]
+      ? {
+          autoSyncEnabled: (settings as Array<{ id: string; autoSyncEnabled?: boolean; autoSyncIntervalMinutes?: number }>)[0]
+            .autoSyncEnabled ?? true,
+          autoSyncIntervalMinutes: (settings as Array<{ id: string; autoSyncEnabled?: boolean; autoSyncIntervalMinutes?: number }>)[0]
+            .autoSyncIntervalMinutes ?? 15,
+        }
+      : {
+          autoSyncEnabled: true,
+          autoSyncIntervalMinutes: 15,
+        },
+    queuedMutations,
   }
 }
 
@@ -90,6 +108,8 @@ export async function saveSnapshot(snapshot: AppSnapshot): Promise<void> {
   const smartLists = transaction.objectStore('smartLists')
   const metadataDocs = transaction.objectStore('metadataDocs')
   const syncLogs = transaction.objectStore('syncLogs')
+  const settings = transaction.objectStore('settings')
+  const queuedMutations = transaction.objectStore('queuedMutations')
 
   accounts.clear()
   collections.clear()
@@ -97,6 +117,8 @@ export async function saveSnapshot(snapshot: AppSnapshot): Promise<void> {
   smartLists.clear()
   metadataDocs.clear()
   syncLogs.clear()
+  settings.clear()
+  queuedMutations.clear()
 
   snapshot.accounts.forEach((entry) => accounts.put(entry))
   snapshot.collections.forEach((entry) => collections.put(entry))
@@ -104,6 +126,8 @@ export async function saveSnapshot(snapshot: AppSnapshot): Promise<void> {
   snapshot.smartLists.forEach((entry) => smartLists.put(entry))
   snapshot.metadataDocs.forEach((entry) => metadataDocs.put(entry))
   snapshot.syncLogs.forEach((entry) => syncLogs.put(entry))
+  settings.put({ id: 'app', ...snapshot.settings })
+  snapshot.queuedMutations.forEach((entry) => queuedMutations.put(entry))
 
   await wrapTransaction(transaction)
 }

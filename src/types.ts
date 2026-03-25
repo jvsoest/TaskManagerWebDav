@@ -116,6 +116,20 @@ export interface SyncLogEntry {
   createdAt: string
 }
 
+export interface AppSettings {
+  autoSyncEnabled: boolean
+  autoSyncIntervalMinutes: number
+}
+
+export interface TaskMutation {
+  id: string
+  accountId: string
+  kind: 'upsert' | 'delete'
+  task: TaskItem
+  collectionId: string
+  createdAt: string
+}
+
 export interface AppSnapshot {
   accounts: Account[]
   collections: TaskCollection[]
@@ -123,6 +137,8 @@ export interface AppSnapshot {
   smartLists: SmartList[]
   metadataDocs: MetadataDocument[]
   syncLogs: SyncLogEntry[]
+  settings: AppSettings
+  queuedMutations: TaskMutation[]
 }
 
 export interface AccountConnectionInput {

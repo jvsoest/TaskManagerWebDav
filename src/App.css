@@ -59,6 +59,7 @@ button {
   z-index: 3;
   display: grid;
   grid-template-rows: auto auto auto 1fr auto;
+  min-height: 0;
   gap: 12px;
   padding: 18px 12px 14px;
   background: #fbf8f4;
@@ -156,6 +157,9 @@ button {
 
 .sidebar-nav {
   align-content: start;
+  min-height: 0;
+  overflow: auto;
+  padding-right: 4px;
 }
 
 .sidebar-group {
@@ -368,7 +372,15 @@ button {
 
 .sidebar-footer {
   align-self: end;
+  display: grid;
+  gap: 10px;
   padding-top: 10px;
+}
+
+.sidebar-footer-actions {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  gap: 8px;
 }
 
 .account-switcher {
@@ -1237,6 +1249,17 @@ button {
   white-space: nowrap;
 }
 
+.checkbox-row {
+  justify-content: space-between;
+  align-items: center;
+  gap: 16px;
+}
+
+.checkbox-row input {
+  width: 16px;
+  height: 16px;
+}
+
 .subtle-all-day input {
   width: 13px;
   height: 13px;
@@ -1328,7 +1351,12 @@ button {
 
   .task-side {
     grid-column: 3;
-    justify-content: flex-start;
+    justify-content: flex-end;
+    width: 100%;
+  }
+
+  .task-list-name {
+    margin-left: auto;
   }
 
   .quick-add-row {

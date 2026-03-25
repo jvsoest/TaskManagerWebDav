@@ -35,11 +35,13 @@ import { newUuid } from './lib/ids'
 import type {
   Account,
   AccountConnectionInput,
+  AppSettings,
   AppSnapshot,
   MetadataDocument,
   SmartList,
   SortDirection,
   SyncLogEntry,
+  TaskMutation,
   TaskItem,
   TaskOrderField,
   TaskOrdering,
@@ -111,6 +113,11 @@ const emptySnapshot: AppSnapshot = {
   smartLists: [],
   metadataDocs: [],
   syncLogs: [],
+  settings: {
+    autoSyncEnabled: true,
+    autoSyncIntervalMinutes: 15,
+  },
+  queuedMutations: [],
 }
 
 const emptyConnection: AccountConnectionInput = {
@@ -165,6 +172,36 @@ function mergeSyncedAndPendingTasks(remoteTasks: TaskItem[], localTasks: TaskIte
     })
 
   return Array.from(mergedById.values())
+}
+
+function isRetryableTaskMutationError(error: unknown): boolean {
+  if (!(error instanceof Error)) {
+    return true
+  }
+
+  const message = error.message
+  const statusMatch = message.match(/\((\d{3})\)/)
+  if (!statusMatch) {
+    return true
+  }
+
+  const status = Number.parseInt(statusMatch[1], 10)
+  return status === 408 || status === 425 || status === 429 || status >= 500
+}
+
+function enqueueTaskMutation(
+  queuedMutations: TaskMutation[],
+  nextMutation: TaskMutation,
+): TaskMutation[] {
+  const deduped = queuedMutations.filter(
+    (entry) => !(entry.accountId === nextMutation.accountId && entry.task.id === nextMutation.task.id),
+  )
+
+  if (nextMutation.kind === 'delete' && !nextMutation.task.url) {
+    return deduped
+  }
+
+  return [...deduped, nextMutation]
 }
 
 function normalizeDateInput(value?: string): string {
@@ -389,6 +426,10 @@ function App() {
   const taskRowsRef = useRef<Map<string, HTMLDivElement>>(new Map())
   const settingsRowsRef = useRef<Map<string, HTMLDivElement>>(new Map())
   const suppressTaskClickRef = useRef(false)
+  const snapshotRef = useRef<AppSnapshot>(emptySnapshot)
+  const syncInFlightRef = useRef<Set<string>>(new Set())
+  const autoSyncedAccountIdsRef = useRef<Set<string>>(new Set())
+  const syncRunnerRef = useRef<(accountId?: string) => void>(() => {})
   const deferredSearch = useDeferredValue(searchText)
 
   useEffect(() => {
@@ -406,6 +447,10 @@ function App() {
 
     void saveSnapshot(snapshot)
   }, [hydrated, snapshot])
+
+  useEffect(() => {
+    snapshotRef.current = snapshot
+  }, [snapshot])
 
   const activeAccount = snapshot.accounts.find((account) => account.id === activeAccountId)
   const activeCollections = snapshot.collections.filter((collection) => collection.accountId === activeAccountId)
@@ -514,6 +559,49 @@ function App() {
   useEffect(() => {
     setSelectedViewTags([])
   }, [activeAccountId, activeViewKey])
+
+  useEffect(() => {
+    if (
+      !hydrated ||
+      !activeAccountId ||
+      !snapshotRef.current.accounts.some((account) => account.id === activeAccountId)
+    ) {
+      return
+    }
+
+    if (autoSyncedAccountIdsRef.current.has(activeAccountId)) {
+      return
+    }
+
+    autoSyncedAccountIdsRef.current.add(activeAccountId)
+    syncRunnerRef.current(activeAccountId)
+  }, [activeAccountId, hydrated])
+
+  useEffect(() => {
+    if (!hydrated || !activeAccountId || !snapshot.settings.autoSyncEnabled) {
+      return
+    }
+
+    const intervalMs = Math.max(1, snapshot.settings.autoSyncIntervalMinutes) * 60_000
+    const intervalId = window.setInterval(() => {
+      syncRunnerRef.current(activeAccountId)
+    }, intervalMs)
+
+    return () => window.clearInterval(intervalId)
+  }, [activeAccountId, hydrated, snapshot.settings.autoSyncEnabled, snapshot.settings.autoSyncIntervalMinutes])
+
+  useEffect(() => {
+    if (!hydrated) {
+      return
+    }
+
+    function handleOnline() {
+      syncRunnerRef.current(activeAccountId)
+    }
+
+    window.addEventListener('online', handleOnline)
+    return () => window.removeEventListener('online', handleOnline)
+  }, [activeAccountId, hydrated])
 
   useEffect(() => {
     const selectedTask = snapshot.tasks.find(
@@ -726,6 +814,81 @@ function App() {
         account.id === accountId ? { ...account, ...patch } : account,
       ),
     })
+  }
+
+  function updateSettings(patch: Partial<AppSettings>) {
+    replaceSnapshotWith((current) => ({
+      ...current,
+      settings: {
+        ...current.settings,
+        ...patch,
+      },
+    }))
+  }
+
+  function queueTaskMutation(kind: TaskMutation['kind'], task: TaskItem, collectionId = task.collectionId) {
+    const mutation: TaskMutation = {
+      id: newId(),
+      accountId: task.accountId,
+      kind,
+      task,
+      collectionId,
+      createdAt: new Date().toISOString(),
+    }
+
+    replaceSnapshotWith((current) => ({
+      ...current,
+      queuedMutations: enqueueTaskMutation(current.queuedMutations, mutation),
+    }))
+  }
+
+  async function flushQueuedMutations(account: Account): Promise<void> {
+    const initialSnapshot = snapshotRef.current
+    const queued = initialSnapshot.queuedMutations
+      .filter((mutation) => mutation.accountId === account.id)
+      .sort((left, right) => left.createdAt.localeCompare(right.createdAt))
+
+    for (const mutation of queued) {
+      const currentSnapshot = snapshotRef.current
+      const currentAccount = currentSnapshot.accounts.find((entry) => entry.id === account.id) ?? account
+      const collection = currentSnapshot.collections.find(
+        (entry) => entry.accountId === account.id && entry.id === mutation.collectionId,
+      )
+
+      if (!collection) {
+        continue
+      }
+
+      try {
+        if (mutation.kind === 'upsert') {
+          const remote = await upsertTaskRemote(currentAccount, collection, mutation.task)
+          replaceSnapshotWith((current) => ({
+            ...current,
+            tasks: current.tasks.map((task) =>
+              task.id === mutation.task.id
+                ? { ...task, url: remote.url, etag: remote.etag, syncState: 'synced' }
+                : task,
+            ),
+            queuedMutations: current.queuedMutations.filter((entry) => entry.id !== mutation.id),
+          }))
+        } else {
+          await deleteTaskRemote(currentAccount, mutation.task)
+          replaceSnapshotWith((current) => ({
+            ...current,
+            queuedMutations: current.queuedMutations.filter((entry) => entry.id !== mutation.id),
+            tasks: current.tasks.filter((task) => task.id !== mutation.task.id),
+          }))
+        }
+      } catch (error) {
+        if (!isRetryableTaskMutationError(error)) {
+          replaceSnapshotWith((current) => ({
+            ...current,
+            queuedMutations: current.queuedMutations.filter((entry) => entry.id !== mutation.id),
+          }))
+        }
+        throw error
+      }
+    }
   }
 
   function openTask(taskId: string) {
@@ -1059,11 +1222,23 @@ function App() {
       return
     }
 
+    if (syncInFlightRef.current.has(account.id)) {
+      return
+    }
+
+    syncInFlightRef.current.add(account.id)
     setBusy(true)
     setMessage(`Syncing ${account.label}...`)
     updateAccount(account.id, { syncState: 'syncing', lastError: undefined })
 
     try {
+      try {
+        await flushQueuedMutations(account)
+      } catch (error) {
+        const failure = error instanceof Error ? error.message : 'Queued task replay failed.'
+        recordSyncIssue('Queued task replay', failure, account.id)
+      }
+
       const result = await syncAccount(account)
       const nextAccount: Account = {
         ...account,
@@ -1100,7 +1275,20 @@ function App() {
       recordSyncIssue('Account sync', failure, account.id)
       setMessage(failure)
     } finally {
+      syncInFlightRef.current.delete(account.id)
       setBusy(false)
+    }
+  }
+
+  syncRunnerRef.current = (accountId?: string) => {
+    const targetId = accountId ?? activeAccountId
+    if (!targetId) {
+      return
+    }
+
+    const account = snapshotRef.current.accounts.find((entry) => entry.id === targetId)
+    if (account) {
+      void handleSyncAccount(account)
     }
   }
 
@@ -1150,6 +1338,7 @@ function App() {
           ...current.tasks.filter((task) => task.id !== nextTask.id),
           { ...nextTask, url: remote.url, etag: remote.etag, syncState: 'synced' },
         ],
+        queuedMutations: current.queuedMutations.filter((entry) => entry.task.id !== nextTask.id),
       }))
       const nextMetadataDoc = withTaskPosition(
         metadataDoc,
@@ -1171,13 +1360,17 @@ function App() {
       }
       closeEditor()
     } catch (error) {
+      const queuedTask = { ...nextTask, syncState: 'error' as const }
       replaceSnapshotWith((current) => ({
         ...current,
         tasks: [
           ...current.tasks.filter((task) => task.id !== nextTask.id),
-          { ...nextTask, syncState: 'error' },
+          queuedTask,
         ],
       }))
+      if (isRetryableTaskMutationError(error)) {
+        queueTaskMutation('upsert', queuedTask, targetCollection.id)
+      }
       const failure = error instanceof Error ? error.message : 'Task save failed.'
       recordSyncIssue('Task save', failure, activeAccount.id)
       setMessage(failure)
@@ -1209,13 +1402,14 @@ function App() {
 
     try {
       const remote = await upsertTaskRemote(activeAccount, targetCollection, updatedTask)
-      replaceSnapshot({
-        ...snapshot,
+      replaceSnapshotWith((current) => ({
+        ...current,
         tasks: [
-          ...snapshot.tasks.filter((entry) => entry.id !== task.id),
+          ...current.tasks.filter((entry) => entry.id !== task.id),
           { ...updatedTask, url: remote.url, etag: remote.etag, syncState: 'synced' },
         ],
-      })
+        queuedMutations: current.queuedMutations.filter((entry) => entry.task.id !== task.id),
+      }))
       const nextMetadataDoc = withTaskPosition(metadataDoc, updatedTask, task)
       if (JSON.stringify(nextMetadataDoc.manualTaskOrder) !== JSON.stringify(metadataDoc.manualTaskOrder)) {
         await saveMetadata(
@@ -1227,10 +1421,14 @@ function App() {
         )
       }
     } catch (error) {
-      replaceSnapshot({
-        ...snapshot,
-        tasks: [...snapshot.tasks.filter((entry) => entry.id !== task.id), { ...task, syncState: 'error' }],
-      })
+      const queuedTask = { ...updatedTask, syncState: 'error' as const }
+      replaceSnapshotWith((current) => ({
+        ...current,
+        tasks: [...current.tasks.filter((entry) => entry.id !== task.id), queuedTask],
+      }))
+      if (isRetryableTaskMutationError(error)) {
+        queueTaskMutation('upsert', queuedTask, targetCollection.id)
+      }
       const failure = error instanceof Error ? error.message : 'Task update failed.'
       recordSyncIssue('Task update', failure, activeAccount.id)
       setMessage(failure)
@@ -1255,6 +1453,10 @@ function App() {
 
     try {
       await deleteTaskRemote(activeAccount, existing)
+      replaceSnapshotWith((current) => ({
+        ...current,
+        queuedMutations: current.queuedMutations.filter((entry) => entry.task.id !== existing.id),
+      }))
       if (metadataDoc) {
         const nextMetadataDoc = {
           ...metadataDoc,
@@ -1275,10 +1477,14 @@ function App() {
       }
       setMessage('Task deleted from CalDAV.')
     } catch (error) {
-      replaceSnapshot({
-        ...snapshot,
-        tasks: [...snapshot.tasks, { ...existing, syncState: 'error' }],
-      })
+      if (isRetryableTaskMutationError(error)) {
+        queueTaskMutation('delete', existing, existing.collectionId)
+      } else {
+        replaceSnapshotWith((current) => ({
+          ...current,
+          tasks: [...current.tasks, { ...existing, syncState: 'error' }],
+        }))
+      }
       const failure = error instanceof Error ? error.message : 'Task delete failed.'
       recordSyncIssue('Task delete', failure, activeAccount.id)
       setMessage(failure)
@@ -1757,6 +1963,7 @@ function App() {
       return
     }
 
+    const existingSmartList = snapshot.smartLists.find((entry) => entry.id === smartDraftId)
     const nextSmartList: SmartList = {
       id: smartDraftId ?? newId(),
       accountId: activeAccount.id,
@@ -1766,22 +1973,24 @@ function App() {
       ordering: normalizeOrdering(smartDraftOrdering, defaultSmartListOrdering()),
       syncState: 'syncing',
       updatedAt: new Date().toISOString(),
+      url: existingSmartList?.url,
+      etag: existingSmartList?.etag,
     }
 
-    replaceSnapshot({
-      ...snapshot,
-      smartLists: [...snapshot.smartLists.filter((entry) => entry.id !== nextSmartList.id), nextSmartList],
-    })
+    replaceSnapshotWith((current) => ({
+      ...current,
+      smartLists: [...current.smartLists.filter((entry) => entry.id !== nextSmartList.id), nextSmartList],
+    }))
 
     try {
       const remote = await upsertSmartListRemote(activeAccount, smartCollection, nextSmartList)
-      replaceSnapshot({
-        ...snapshot,
+      replaceSnapshotWith((current) => ({
+        ...current,
         smartLists: [
-          ...snapshot.smartLists.filter((entry) => entry.id !== nextSmartList.id),
+          ...current.smartLists.filter((entry) => entry.id !== nextSmartList.id),
           { ...nextSmartList, url: remote.url, etag: remote.etag, syncState: 'synced' },
         ],
-      })
+      }))
       const needsOrderUpdate = !metadataDoc.smartListOrder.includes(nextSmartList.id)
       if (needsOrderUpdate) {
         await saveMetadata(
@@ -1937,6 +2146,7 @@ function App() {
           ...current.tasks.filter((task) => task.id !== nextTask.id),
           { ...nextTask, url: remote.url, etag: remote.etag, syncState: 'synced' },
         ],
+        queuedMutations: current.queuedMutations.filter((entry) => entry.task.id !== nextTask.id),
       }))
       const nextMetadataDoc = withTaskPosition(metadataDoc, nextTask)
       const metadataChanged =
@@ -1953,13 +2163,17 @@ function App() {
         setMessage('Task added.')
       }
     } catch (error) {
+      const queuedTask = { ...nextTask, syncState: 'error' as const }
       replaceSnapshotWith((current) => ({
         ...current,
         tasks: [
           ...current.tasks.filter((task) => task.id !== nextTask.id),
-          { ...nextTask, syncState: 'error' },
+          queuedTask,
         ],
       }))
+      if (isRetryableTaskMutationError(error)) {
+        queueTaskMutation('upsert', queuedTask, targetCollection.id)
+      }
       const failure = error instanceof Error ? error.message : 'Quick add failed.'
       recordSyncIssue('Quick add', failure, activeAccount.id)
       setMessage(failure)
@@ -2003,6 +2217,7 @@ function App() {
             }`}
             style={collectionColorStyle(collection.color)}
             onClick={() => {
+              setWorkspaceMode('tasks')
               setActiveView({ kind: 'collection', collectionId: collection.id })
               setCollectionViewScope('self')
               setIsSidebarOpen(false)
@@ -2282,6 +2497,7 @@ function App() {
                     activeView?.kind === 'smart' && activeView.smartListId === smartList.id ? 'active' : ''
                   }`}
                   onClick={() => {
+                    setWorkspaceMode('tasks')
                     setActiveView({ kind: 'smart', smartListId: smartList.id })
                     setIsSidebarOpen(false)
                   }}
@@ -2309,6 +2525,14 @@ function App() {
         </nav>
 
         <div className="sidebar-footer">
+          <div className="sidebar-footer-actions">
+            <button className="ghost-button" onClick={() => openSettings('accounts')}>
+              Settings
+            </button>
+            <button className="primary-button" onClick={() => void handleSyncAccount()} disabled={!activeAccount || busy}>
+              {busy ? 'Working...' : 'Sync'}
+            </button>
+          </div>
           <button className="account-switcher" onClick={() => openSettings('accounts')}>
             <div>
               <strong>{activeAccount?.label ?? 'No account'}</strong>
@@ -2400,13 +2624,13 @@ function App() {
                         <p>Window 1 of 2</p>
                         <h3>Accounts</h3>
                       </div>
-                      <button
-                        className="ghost-button"
-                        onClick={() => void handleSyncAccount()}
-                        disabled={!activeAccount || busy}
-                      >
-                        Sync
-                      </button>
+                          <button
+                            className="ghost-button"
+                            onClick={() => void handleSyncAccount()}
+                            disabled={!activeAccount || busy}
+                          >
+                            Sync
+                          </button>
                     </div>
 
                     <div className="stack-list">
@@ -2479,6 +2703,39 @@ function App() {
                       <button className="primary-button" onClick={() => void handleConnectAccount()} disabled={busy}>
                         Connect account
                       </button>
+                    </div>
+
+                    <div className="settings-block">
+                      <div className="section-title-row">
+                        <h4>Auto-sync</h4>
+                      </div>
+                      <div className="settings-form split">
+                        <label className="simple-row checkbox-row">
+                          <div>
+                            <strong>Enable periodic sync</strong>
+                            <span>Sync on app open, when coming back online, and at the selected interval.</span>
+                          </div>
+                          <input
+                            type="checkbox"
+                            checked={snapshot.settings.autoSyncEnabled}
+                            onChange={(event) => updateSettings({ autoSyncEnabled: event.target.checked })}
+                          />
+                        </label>
+                        <select
+                          value={String(snapshot.settings.autoSyncIntervalMinutes)}
+                          onChange={(event) =>
+                            updateSettings({
+                              autoSyncIntervalMinutes: Number.parseInt(event.target.value, 10) || 15,
+                            })
+                          }
+                          disabled={!snapshot.settings.autoSyncEnabled}
+                        >
+                          <option value="5">Every 5 minutes</option>
+                          <option value="15">Every 15 minutes</option>
+                          <option value="30">Every 30 minutes</option>
+                          <option value="60">Every hour</option>
+                        </select>
+                      </div>
                     </div>
 
                     <div className="settings-block">
