@@ -217,6 +217,22 @@ function isEditableTarget(target: EventTarget | null): boolean {
   return Boolean(element.closest('input, textarea, select, [contenteditable="true"]'))
 }
 
+function isAltGraphShortcut(event: KeyboardEvent): boolean {
+  return event.getModifierState?.('AltGraph') === true
+}
+
+function matchesKey(event: KeyboardEvent, code: string, key?: string): boolean {
+  if (event.code === code) {
+    return true
+  }
+
+  if (!key) {
+    return false
+  }
+
+  return event.key.toLowerCase() === key.toLowerCase()
+}
+
 function normalizeDateInput(value?: string): string {
   if (!value) {
     return ''
@@ -852,6 +868,12 @@ function App() {
 
     return navigationItems.filter((item) => item.label.toLowerCase().includes(query))
   }, [navigationItems, quickSwitcherQuery])
+  const closeEditor = useCallback(() => {
+    setSelectedTaskId(undefined)
+    setIsCreatingTask(false)
+    setTaskDraft(createDraft(preferredTaskCollectionId, activeAccountId))
+    setDescriptionMode('edit')
+  }, [activeAccountId, preferredTaskCollectionId])
 
   useEffect(() => {
     if (visibleTasks.length === 0) {
@@ -886,11 +908,17 @@ function App() {
         return
       }
 
+      if (!event.metaKey && !event.ctrlKey && !event.altKey && isEditorMode && event.key === 'Escape') {
+        event.preventDefault()
+        closeEditor()
+        return
+      }
+
       if (isEditableTarget(event.target)) {
         return
       }
 
-      if (event.key === '/') {
+      if (!event.metaKey && !event.ctrlKey && !event.altKey && (event.code === 'Slash' || event.key === '/')) {
         event.preventDefault()
         searchInputRef.current?.focus()
         searchInputRef.current?.select()
@@ -900,7 +928,7 @@ function App() {
       if (!event.metaKey && !event.ctrlKey && !event.altKey) {
         if (shortcutPrefixRef.current?.key === 'g') {
           window.clearTimeout(shortcutPrefixRef.current.timeoutId)
-          const isListSwitcher = event.key.toLowerCase() === 'l'
+          const isListSwitcher = matchesKey(event, 'KeyL', 'l')
           shortcutPrefixRef.current = undefined
           if (isListSwitcher) {
             event.preventDefault()
@@ -909,7 +937,7 @@ function App() {
           }
         }
 
-        if (event.key.toLowerCase() === 'g') {
+        if (matchesKey(event, 'KeyG', 'g')) {
           event.preventDefault()
           if (shortcutPrefixRef.current) {
             window.clearTimeout(shortcutPrefixRef.current.timeoutId)
@@ -924,13 +952,19 @@ function App() {
         }
       }
 
-      if (!event.metaKey && !event.ctrlKey && !event.altKey && event.key.toLowerCase() === 'q') {
+      if (!event.metaKey && !event.ctrlKey && !event.altKey && matchesKey(event, 'KeyQ', 'q')) {
         event.preventDefault()
         actionRefs.current.beginNewTask()
         return
       }
 
-      if (!event.metaKey && !event.ctrlKey && !event.altKey && (event.key === '[' || event.key === ']')) {
+      const isBracketShortcut =
+        matchesKey(event, 'BracketLeft', '[') ||
+        matchesKey(event, 'BracketRight', ']')
+      const allowsBracketShortcut =
+        !event.metaKey && (!event.ctrlKey && !event.altKey || isAltGraphShortcut(event))
+
+      if (allowsBracketShortcut && isBracketShortcut) {
         if (navigationItems.length === 0) {
           return
         }
@@ -938,7 +972,7 @@ function App() {
         event.preventDefault()
         const currentIndex = navigationItems.findIndex((item) => `${item.kind}:${item.id}` === activeNavigationKey)
         const baseIndex = currentIndex >= 0 ? currentIndex : 0
-        const delta = event.key === ']' ? 1 : -1
+        const delta = matchesKey(event, 'BracketRight', ']') ? 1 : -1
         const nextIndex = (baseIndex + delta + navigationItems.length) % navigationItems.length
         activateNavigationItem(navigationItems[nextIndex])
         return
@@ -975,10 +1009,11 @@ function App() {
       }
     }
 
-    window.addEventListener('keydown', handleGlobalKeyDown)
-    return () => window.removeEventListener('keydown', handleGlobalKeyDown)
+    document.addEventListener('keydown', handleGlobalKeyDown, true)
+    return () => document.removeEventListener('keydown', handleGlobalKeyDown, true)
   }, [
     activeNavigationKey,
+    closeEditor,
     isEditorMode,
     isQuickSwitcherOpen,
     isSettingsMode,
@@ -1130,13 +1165,6 @@ function App() {
     setIsCreatingTask(false)
     setIsSidebarOpen(false)
     setKeyboardSelectedTaskId(taskId)
-  }
-
-  function closeEditor() {
-    setSelectedTaskId(undefined)
-    setIsCreatingTask(false)
-    setTaskDraft(createDraft(preferredTaskCollectionId, activeAccountId))
-    setDescriptionMode('edit')
   }
 
   function activateNavigationItem(item: { kind: 'collection' | 'smart'; id: string }) {

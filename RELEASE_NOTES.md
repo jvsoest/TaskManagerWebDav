@@ -36,6 +36,7 @@
 - Added `q` for new task creation, `ArrowUp` / `ArrowDown` for task-list navigation, `Enter` to open the selected task, and `Space` to toggle completion.
 - Added `Ctrl/Cmd+S` to save from the task editor and `/` to focus search.
 - Added keyboard navigation between smart lists and lists with `g l` for a searchable quick switcher and `[` / `]` for previous/next view navigation in sidebar order.
+- Improved keyboard shortcut reliability on Windows/Edge by matching physical keys more robustly, allowing bracket navigation on layouts that use `AltGr`, and making `Escape` close the task editor consistently.
 
 ### Verification
 - `npm run build`
