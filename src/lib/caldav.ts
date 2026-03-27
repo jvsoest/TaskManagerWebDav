@@ -15,10 +15,12 @@ import type {
   AccountConnectionInput,
   DiscoverAccountResult,
   MetadataDocument,
+  ReminderAnchor,
   SmartList,
   SyncResult,
   TaskCollection,
   TaskItem,
+  TaskReminder,
 } from '../types'
 
 const METADATA_COLLECTION_NAME = 'taskmanager-meta'
@@ -881,6 +883,115 @@ function isDateOnlyValue(rawKey: string, value: string): boolean {
   return rawKey.toUpperCase().includes('VALUE=DATE') || /^\d{8}$/.test(value)
 }
 
+function parseDurationToMinutes(value: string): number | undefined {
+  const match = value.match(/^-?P(?:(\d+)W)?(?:(\d+)D)?(?:T(?:(\d+)H)?(?:(\d+)M)?)?$/i)
+  if (!match) {
+    return undefined
+  }
+
+  const sign = value.startsWith('-') ? -1 : 1
+  const weeks = Number.parseInt(match[1] ?? '0', 10)
+  const days = Number.parseInt(match[2] ?? '0', 10)
+  const hours = Number.parseInt(match[3] ?? '0', 10)
+  const minutes = Number.parseInt(match[4] ?? '0', 10)
+  return sign * (weeks * 7 * 24 * 60 + days * 24 * 60 + hours * 60 + minutes)
+}
+
+function formatReminderDuration(minutesBefore: number): string {
+  let remaining = Math.max(0, minutesBefore)
+  const days = Math.floor(remaining / 1440)
+  remaining -= days * 1440
+  const hours = Math.floor(remaining / 60)
+  remaining -= hours * 60
+  const minutes = remaining
+  const datePart = days > 0 ? `${days}D` : ''
+  const timePart = `${hours > 0 ? `${hours}H` : ''}${minutes > 0 || (days === 0 && hours === 0) ? `${minutes}M` : ''}`
+  return `-P${datePart}${timePart ? `T${timePart}` : ''}`
+}
+
+function parseValarmBlock(lines: string[]): { reminder?: TaskReminder; supported: boolean } {
+  const props = new Map<string, { rawKey: string; value: string }[]>()
+
+  lines.forEach((line) => {
+    const index = line.indexOf(':')
+    if (index < 0) {
+      return
+    }
+
+    const rawKey = line.slice(0, index)
+    const key = rawKey.split(';')[0].toUpperCase()
+    const value = line.slice(index + 1)
+    const entries = props.get(key) ?? []
+    entries.push({ rawKey, value })
+    props.set(key, entries)
+  })
+
+  if ((props.get('ACTION')?.[0]?.value ?? '').toUpperCase() !== 'DISPLAY') {
+    return { supported: false }
+  }
+
+  if (props.has('REPEAT') || props.has('DURATION')) {
+    return { supported: false }
+  }
+
+  const trigger = props.get('TRIGGER')?.[0]
+  if (!trigger) {
+    return { supported: false }
+  }
+
+  const rawTriggerKey = trigger.rawKey.toUpperCase()
+  if (rawTriggerKey.includes('VALUE=DATE-TIME') || /^\d{8}T\d{6}Z?$/.test(trigger.value)) {
+    const at = parseIcsDate(trigger.value)
+    return at
+      ? {
+          supported: true,
+          reminder: {
+            id: newUuid(),
+            kind: 'absolute',
+            at,
+          },
+        }
+      : { supported: false }
+  }
+
+  const durationMinutes = parseDurationToMinutes(trigger.value)
+  if (durationMinutes === undefined || durationMinutes >= 0) {
+    return { supported: false }
+  }
+
+  const anchor: ReminderAnchor = rawTriggerKey.includes('RELATED=END') ? 'due' : 'start'
+  return {
+    supported: true,
+    reminder: {
+      id: newUuid(),
+      kind: 'relative',
+      anchor,
+      minutesBefore: Math.abs(durationMinutes),
+    },
+  }
+}
+
+function reminderToValarm(task: TaskItem, reminder: TaskReminder): string[] {
+  const description = escapeIcs(task.title || 'Task reminder')
+  if (reminder.kind === 'absolute') {
+    return [
+      'BEGIN:VALARM',
+      'ACTION:DISPLAY',
+      `DESCRIPTION:${description}`,
+      `TRIGGER;VALUE=DATE-TIME:${formatIcsDate(reminder.at)}`,
+      'END:VALARM',
+    ]
+  }
+
+  return [
+    'BEGIN:VALARM',
+    'ACTION:DISPLAY',
+    `DESCRIPTION:${description}`,
+    `TRIGGER;RELATED=${reminder.anchor === 'due' ? 'END' : 'START'}:${formatReminderDuration(reminder.minutesBefore)}`,
+    'END:VALARM',
+  ]
+}
+
 function parseTaskFromIcs(
   payload: string,
   accountId: string,
@@ -888,8 +999,30 @@ function parseTaskFromIcs(
 ): TaskItem | undefined {
   const lines = unfoldIcs(payload)
   const props = new Map<string, string[]>()
+  const reminders: TaskReminder[] = []
+  const unsupportedReminderBlocks: string[] = []
+  let currentAlarmLines: string[] | undefined
 
   lines.forEach((line) => {
+    if (line.toUpperCase() === 'BEGIN:VALARM') {
+      currentAlarmLines = [line]
+      return
+    }
+
+    if (currentAlarmLines) {
+      currentAlarmLines.push(line)
+      if (line.toUpperCase() === 'END:VALARM') {
+        const parsedAlarm = parseValarmBlock(currentAlarmLines)
+        if (parsedAlarm.supported && parsedAlarm.reminder) {
+          reminders.push(parsedAlarm.reminder)
+        } else {
+          unsupportedReminderBlocks.push(currentAlarmLines.join('\r\n'))
+        }
+        currentAlarmLines = undefined
+      }
+      return
+    }
+
     const index = line.indexOf(':')
     if (index < 0) {
       return
@@ -931,6 +1064,8 @@ function parseTaskFromIcs(
     startDateIsAllDay: props.get('X-TASKMANAGER-DTSTART-ALLDAY')?.[0] === '1',
     dueDate: parseIcsDate(props.get('DUE')?.[0]),
     dueDateIsAllDay: props.get('X-TASKMANAGER-DUE-ALLDAY')?.[0] === '1',
+    reminders,
+    unsupportedReminderBlocks,
     completedAt: parseIcsDate(props.get('COMPLETED')?.[0]),
     createdAt: parseIcsDate(props.get('CREATED')?.[0]) ?? new Date().toISOString(),
     updatedAt: parseIcsDate(props.get('LAST-MODIFIED')?.[0]) ?? new Date().toISOString(),
@@ -1069,6 +1204,8 @@ function metadataTask(
     priority: 0,
     createdAt: doc.updatedAt,
     updatedAt: doc.updatedAt,
+    reminders: [],
+    unsupportedReminderBlocks: [],
     tagIds: [],
     syncState: 'synced',
     url: doc.url,
@@ -1274,6 +1411,8 @@ function smartListTask(smartList: SmartList, collectionId: string): TaskItem {
     priority: 0,
     createdAt: smartList.updatedAt,
     updatedAt: smartList.updatedAt,
+    reminders: [],
+    unsupportedReminderBlocks: [],
     tagIds: [],
     syncState: 'synced',
   }
@@ -1320,6 +1459,12 @@ function taskToIcs(task: TaskItem): string {
   if (task.completedAt) {
     lines.push(`COMPLETED:${formatIcsDate(task.completedAt)}`)
   }
+  task.reminders.forEach((reminder) => {
+    lines.push(...reminderToValarm(task, reminder))
+  })
+  ;(task.unsupportedReminderBlocks ?? []).forEach((block) => {
+    lines.push(...block.split(/\r?\n/).filter(Boolean))
+  })
 
   lines.push('END:VTODO', 'END:VCALENDAR', '')
   return lines.join('\r\n')
@@ -1583,6 +1728,8 @@ export async function deleteSmartListRemote(account: Account, smartList: SmartLi
     priority: 0,
     createdAt: smartList.updatedAt,
     updatedAt: smartList.updatedAt,
+    reminders: [],
+    unsupportedReminderBlocks: [],
     tagIds: [],
     syncState: 'synced',
     url: smartList.url,

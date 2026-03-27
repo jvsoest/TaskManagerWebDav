@@ -1,5 +1,26 @@
 import type { TaskItem } from '../types'
 
+function reminderTimestamp(task: TaskItem): number | undefined {
+  const upcoming = task.reminders
+    .map((reminder) => {
+      if (reminder.kind === 'absolute') {
+        return new Date(reminder.at).getTime()
+      }
+
+      const anchorValue = reminder.anchor === 'start' ? task.startDate : task.dueDate
+      if (!anchorValue) {
+        return undefined
+      }
+
+      const anchorTime = new Date(anchorValue).getTime()
+      return Number.isNaN(anchorTime) ? undefined : anchorTime - reminder.minutesBefore * 60_000
+    })
+    .filter((value): value is number => typeof value === 'number' && !Number.isNaN(value))
+    .sort((left, right) => left - right)
+
+  return upcoming[0]
+}
+
 export function canNotify(): boolean {
   return typeof window !== 'undefined' && 'Notification' in window
 }
@@ -22,13 +43,20 @@ export function notifyDueTasks(tasks: TaskItem[], deliveredIds: Set<string>): vo
   const graceWindowMs = 5 * 60 * 1000
 
   tasks
-    .filter((task) => task.status !== 'completed' && task.dueDate)
+    .filter((task) => task.status !== 'completed')
     .forEach((task) => {
-      if (!task.dueDate || deliveredIds.has(task.id)) {
+      if (deliveredIds.has(task.id)) {
         return
       }
 
-      const dueAt = new Date(task.dueDate).getTime()
+      const dueAt =
+        reminderTimestamp(task) ??
+        (task.dueDate ? new Date(task.dueDate).getTime() : undefined)
+
+      if (dueAt === undefined) {
+        return
+      }
+
       if (Number.isNaN(dueAt)) {
         return
       }

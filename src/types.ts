@@ -7,6 +7,22 @@ export type TaskOrderMode = 'manual' | 'property'
 export type TaskOrderField = 'dueDate' | 'startDate' | 'priority' | 'title' | 'createdAt' | 'updatedAt' | 'status'
 export type SortDirection = 'asc' | 'desc'
 export type ConnectionMode = 'direct' | 'proxy'
+export type ReminderAnchor = 'start' | 'due'
+
+export interface TaskReminderAbsolute {
+  id: string
+  kind: 'absolute'
+  at: string
+}
+
+export interface TaskReminderRelative {
+  id: string
+  kind: 'relative'
+  anchor: ReminderAnchor
+  minutesBefore: number
+}
+
+export type TaskReminder = TaskReminderAbsolute | TaskReminderRelative
 
 export interface TaskOrdering {
   mode: TaskOrderMode
@@ -77,6 +93,8 @@ export interface TaskItem {
   startDateIsAllDay?: boolean
   dueDate?: string
   dueDateIsAllDay?: boolean
+  reminders: TaskReminder[]
+  unsupportedReminderBlocks?: string[]
   completedAt?: string
   createdAt: string
   updatedAt: string

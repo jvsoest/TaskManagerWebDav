@@ -1,4 +1,6 @@
 import { startTransition, useCallback, useDeferredValue, useEffect, useMemo, useRef, useState } from 'react'
+import rehypeRaw from 'rehype-raw'
+import rehypeSanitize from 'rehype-sanitize'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import './App.css'
@@ -38,9 +40,11 @@ import type {
   AppSettings,
   AppSnapshot,
   MetadataDocument,
+  ReminderAnchor,
   SmartList,
   SortDirection,
   SyncLogEntry,
+  TaskReminder,
   TaskMutation,
   TaskItem,
   TaskOrderField,
@@ -56,6 +60,7 @@ type WorkspaceMode = 'tasks' | 'settings'
 type SettingsSection = 'accounts' | 'structure'
 type CollectionViewScope = 'self' | 'self-and-descendants'
 type DescriptionMode = 'display' | 'edit'
+type SelectionMode = 'inactive' | 'active'
 
 type TaskDraft = Omit<TaskItem, 'id' | 'uid' | 'createdAt' | 'updatedAt' | 'syncState'> & {
   id?: string
@@ -63,7 +68,9 @@ type TaskDraft = Omit<TaskItem, 'id' | 'uid' | 'createdAt' | 'updatedAt' | 'sync
 }
 
 type DragSession = {
-  taskId: string
+  taskIds: string[]
+  primaryTaskId: string
+  sourceCollectionId: string
   pointerX: number
   pointerY: number
   offsetX: number
@@ -154,6 +161,8 @@ function createDraft(collectionId?: string, accountId?: string): TaskDraft {
     priority: 0,
     startDateIsAllDay: true,
     dueDateIsAllDay: true,
+    reminders: [],
+    unsupportedReminderBlocks: [],
     tagIds: [],
   }
 }
@@ -231,6 +240,10 @@ function matchesKey(event: KeyboardEvent, code: string, key?: string): boolean {
   }
 
   return event.key.toLowerCase() === key.toLowerCase()
+}
+
+function printableShortcutKey(event: KeyboardEvent): string {
+  return event.key.length === 1 ? event.key : ''
 }
 
 function normalizeDateInput(value?: string): string {
@@ -326,6 +339,12 @@ function sameTaskDraft(left: TaskDraft, right: TaskDraft): boolean {
     left.startDateIsAllDay === right.startDateIsAllDay &&
     left.dueDate === right.dueDate &&
     left.dueDateIsAllDay === right.dueDateIsAllDay &&
+    left.reminders.length === right.reminders.length &&
+    left.reminders.every((reminder, index) => JSON.stringify(reminder) === JSON.stringify(right.reminders[index])) &&
+    (left.unsupportedReminderBlocks ?? []).length === (right.unsupportedReminderBlocks ?? []).length &&
+    (left.unsupportedReminderBlocks ?? []).every(
+      (block, index) => block === (right.unsupportedReminderBlocks ?? [])[index],
+    ) &&
     left.completedAt === right.completedAt &&
     left.url === right.url &&
     left.etag === right.etag &&
@@ -433,6 +452,9 @@ function App() {
   const [smartDraftShowCompleted, setSmartDraftShowCompleted] = useState(false)
   const [searchText, setSearchText] = useState('')
   const [selectedViewTags, setSelectedViewTags] = useState<string[]>([])
+  const [selectionMode, setSelectionMode] = useState<SelectionMode>('inactive')
+  const [selectedTaskIds, setSelectedTaskIds] = useState<string[]>([])
+  const [selectionAnchorTaskId, setSelectionAnchorTaskId] = useState<string>()
   const [busy, setBusy] = useState(false)
   const [message, setMessage] = useState('Connect a CalDAV account to start syncing tasks.')
   const [isCreatingTask, setIsCreatingTask] = useState(false)
@@ -442,6 +464,7 @@ function App() {
   const [dragSession, setDragSession] = useState<DragSession>()
   const [pendingTaskPress, setPendingTaskPress] = useState<PendingTaskPress>()
   const [dropIndex, setDropIndex] = useState<number>()
+  const [sidebarDropCollectionId, setSidebarDropCollectionId] = useState<string>()
   const [settingsDragSession, setSettingsDragSession] = useState<SettingsDragSession>()
   const [pendingSettingsPress, setPendingSettingsPress] = useState<PendingSettingsPress>()
   const [settingsDropIndex, setSettingsDropIndex] = useState<number>()
@@ -458,6 +481,7 @@ function App() {
   const deliveredRef = useRef<Set<string>>(new Set())
   const taskRowsRef = useRef<Map<string, HTMLDivElement>>(new Map())
   const settingsRowsRef = useRef<Map<string, HTMLDivElement>>(new Map())
+  const sidebarCollectionRefs = useRef<Map<string, HTMLButtonElement>>(new Map())
   const titleInputRef = useRef<HTMLInputElement>(null)
   const searchInputRef = useRef<HTMLInputElement>(null)
   const quickSwitcherInputRef = useRef<HTMLInputElement>(null)
@@ -466,6 +490,9 @@ function App() {
   const syncInFlightRef = useRef<Set<string>>(new Set())
   const autoSyncedAccountIdsRef = useRef<Set<string>>(new Set())
   const syncRunnerRef = useRef<(accountId?: string) => void>(() => {})
+  const moveTasksToCollectionRef = useRef<(taskIds: string[], targetCollectionId: string) => Promise<void>>(
+    () => Promise.resolve(),
+  )
   const shortcutPrefixRef = useRef<{ key: string; timeoutId: number }>()
   const actionRefs = useRef<{
     beginNewTask: () => void
@@ -627,6 +654,9 @@ function App() {
 
   useEffect(() => {
     setSelectedViewTags([])
+    setSelectedTaskIds([])
+    setSelectionAnchorTaskId(undefined)
+    setSelectionMode('inactive')
   }, [activeAccountId, activeViewKey])
 
   useEffect(() => {
@@ -691,6 +721,8 @@ function App() {
         startDateIsAllDay: selectedTask.startDateIsAllDay ?? true,
         dueDate: selectedTask.dueDate,
         dueDateIsAllDay: selectedTask.dueDateIsAllDay ?? true,
+        reminders: selectedTask.reminders,
+        unsupportedReminderBlocks: selectedTask.unsupportedReminderBlocks,
         completedAt: selectedTask.completedAt,
         tagIds: selectedTask.tagIds,
         url: selectedTask.url,
@@ -819,10 +851,6 @@ function App() {
 
     return sortTasks(tasks, currentOrdering, manualTaskIds)
   }, [activeSmartList, activeTasks, activeView, collectionViewScope, currentOrdering, deferredSearch, metadataDoc, taskCollections])
-  const visibleFilterTags = useMemo(
-    () => Array.from(new Set(scopedVisibleTasks.flatMap((task) => task.tagIds))).sort(),
-    [scopedVisibleTasks],
-  )
   const visibleTasks = useMemo(() => {
     const tagFilteredTasks =
       selectedViewTags.length === 0
@@ -835,6 +863,10 @@ function App() {
       ? tagFilteredTasks
       : tagFilteredTasks.filter((task) => task.status !== 'completed')
   }, [currentViewShowCompleted, scopedVisibleTasks, selectedViewTags])
+  const visibleFilterTags = useMemo(
+    () => Array.from(new Set(visibleTasks.flatMap((task) => task.tagIds))).sort(),
+    [visibleTasks],
+  )
   const openVisibleTasks = useMemo(
     () => visibleTasks.filter((task) => task.status !== 'completed'),
     [visibleTasks],
@@ -848,10 +880,10 @@ function App() {
       return openVisibleTasks
     }
 
-    return openVisibleTasks.filter((task) => task.id !== dragSession.taskId)
+    return openVisibleTasks.filter((task) => !dragSession.taskIds.includes(task.id))
   }, [canManualReorderTasks, dragSession, openVisibleTasks])
   const renderedCompletedTasks = completedVisibleTasks
-  const draggedTask = dragSession ? visibleTasks.find((task) => task.id === dragSession.taskId) : undefined
+  const draggedTask = dragSession ? visibleTasks.find((task) => task.id === dragSession.primaryTaskId) : undefined
   const draggedSettingsCollection =
     settingsDragSession?.kind === 'collection'
       ? orderedTaskCollections.find((collection) => collection.id === settingsDragSession.itemId)
@@ -885,6 +917,10 @@ function App() {
       current && visibleTasks.some((task) => task.id === current) ? current : visibleTasks[0].id,
     )
   }, [activeViewKey, deferredSearch, selectedViewTags, visibleTasks])
+
+  useEffect(() => {
+    setSelectedTaskIds((current) => current.filter((taskId) => visibleTasks.some((task) => task.id === taskId)))
+  }, [visibleTasks])
 
   useEffect(() => {
     function handleGlobalKeyDown(event: KeyboardEvent) {
@@ -928,7 +964,7 @@ function App() {
       if (!event.metaKey && !event.ctrlKey && !event.altKey) {
         if (shortcutPrefixRef.current?.key === 'g') {
           window.clearTimeout(shortcutPrefixRef.current.timeoutId)
-          const isListSwitcher = matchesKey(event, 'KeyL', 'l')
+          const isListSwitcher = matchesKey(event, 'KeyL', 'l') || printableShortcutKey(event).toLowerCase() === 'l'
           shortcutPrefixRef.current = undefined
           if (isListSwitcher) {
             event.preventDefault()
@@ -946,7 +982,7 @@ function App() {
             key: 'g',
             timeoutId: window.setTimeout(() => {
               shortcutPrefixRef.current = undefined
-            }, 1000),
+            }, 1800),
           }
           return
         }
@@ -958,11 +994,19 @@ function App() {
         return
       }
 
+      const bracketKey = printableShortcutKey(event)
       const isBracketShortcut =
+        bracketKey === '[' ||
+        bracketKey === ']' ||
         matchesKey(event, 'BracketLeft', '[') ||
         matchesKey(event, 'BracketRight', ']')
       const allowsBracketShortcut =
-        !event.metaKey && (!event.ctrlKey && !event.altKey || isAltGraphShortcut(event))
+        !event.metaKey &&
+        (
+          (!event.ctrlKey && !event.altKey) ||
+          isAltGraphShortcut(event) ||
+          ((bracketKey === '[' || bracketKey === ']') && event.ctrlKey && event.altKey)
+        )
 
       if (allowsBracketShortcut && isBracketShortcut) {
         if (navigationItems.length === 0) {
@@ -972,7 +1016,7 @@ function App() {
         event.preventDefault()
         const currentIndex = navigationItems.findIndex((item) => `${item.kind}:${item.id}` === activeNavigationKey)
         const baseIndex = currentIndex >= 0 ? currentIndex : 0
-        const delta = matchesKey(event, 'BracketRight', ']') ? 1 : -1
+        const delta = bracketKey === ']' || matchesKey(event, 'BracketRight', ']') ? 1 : -1
         const nextIndex = (baseIndex + delta + navigationItems.length) % navigationItems.length
         activateNavigationItem(navigationItems[nextIndex])
         return
@@ -1200,6 +1244,182 @@ function App() {
     setWorkspaceMode('tasks')
   }
 
+  function toggleTaskSelection(taskId: string) {
+    setSelectedTaskIds((current) =>
+      current.includes(taskId) ? current.filter((entry) => entry !== taskId) : [...current, taskId],
+    )
+    setSelectionAnchorTaskId(taskId)
+    setSelectionMode('active')
+  }
+
+  function selectTaskRange(taskId: string) {
+    const anchorId = selectionAnchorTaskId ?? selectedTaskIds[0] ?? taskId
+    const startIndex = visibleTasks.findIndex((task) => task.id === anchorId)
+    const endIndex = visibleTasks.findIndex((task) => task.id === taskId)
+    if (startIndex < 0 || endIndex < 0) {
+      setSelectedTaskIds([taskId])
+      setSelectionAnchorTaskId(taskId)
+      setSelectionMode('active')
+      return
+    }
+
+    const [fromIndex, toIndex] = startIndex <= endIndex ? [startIndex, endIndex] : [endIndex, startIndex]
+    const rangeIds = visibleTasks.slice(fromIndex, toIndex + 1).map((task) => task.id)
+    setSelectedTaskIds(rangeIds)
+    setSelectionAnchorTaskId(anchorId)
+    setSelectionMode('active')
+  }
+
+  function clearSelection() {
+    setSelectedTaskIds([])
+    setSelectionAnchorTaskId(undefined)
+    setSelectionMode('inactive')
+  }
+
+  async function moveTasksToCollection(taskIds: string[], targetCollectionId: string) {
+    if (!activeAccount || !metadataDoc || taskIds.length === 0) {
+      return
+    }
+
+    const targetCollection = taskCollections.find((collection) => collection.id === targetCollectionId)
+    if (!targetCollection) {
+      return
+    }
+
+    const tasksToMove = snapshot.tasks.filter((task) => taskIds.includes(task.id))
+    if (tasksToMove.length === 0) {
+      return
+    }
+
+    const now = new Date().toISOString()
+    const movedTasks = tasksToMove.map((task) => ({
+      ...task,
+      collectionId: targetCollectionId,
+      updatedAt: now,
+      syncState: 'syncing' as const,
+      etag: undefined,
+      url: undefined,
+    }))
+
+    replaceSnapshotWith((current) => ({
+      ...current,
+      tasks: current.tasks.map((task) => movedTasks.find((entry) => entry.id === task.id) ?? task),
+    }))
+
+    const nextMetadataDoc = movedTasks.reduce(
+      (currentDoc, task) =>
+        withTaskPosition(
+          currentDoc,
+          task,
+          tasksToMove.find((entry) => entry.id === task.id),
+        ),
+      {
+        ...metadataDoc,
+        updatedAt: now,
+      },
+    )
+
+    try {
+      for (const task of movedTasks) {
+        const remote = await upsertTaskRemote(activeAccount, targetCollection, task)
+        replaceSnapshotWith((current) => ({
+          ...current,
+          tasks: current.tasks.map((entry) =>
+            entry.id === task.id ? { ...task, url: remote.url, etag: remote.etag, syncState: 'synced' } : entry,
+          ),
+        }))
+      }
+
+      if (JSON.stringify(nextMetadataDoc.manualTaskOrder) !== JSON.stringify(metadataDoc.manualTaskOrder)) {
+        await saveMetadata(nextMetadataDoc, 'Tasks moved.')
+      } else {
+        setMessage('Tasks moved.')
+      }
+      clearSelection()
+    } catch (error) {
+      const failure = error instanceof Error ? error.message : 'Task move failed.'
+      recordSyncIssue('Task move', failure, activeAccount.id)
+      setMessage(failure)
+    }
+  }
+
+  moveTasksToCollectionRef.current = moveTasksToCollection
+
+  async function handleBulkDeleteTasks() {
+    if (!activeAccount || selectedTaskIds.length === 0) {
+      return
+    }
+
+    const tasksToDelete = snapshot.tasks.filter((task) => selectedTaskIds.includes(task.id))
+    replaceSnapshotWith((current) => ({
+      ...current,
+      tasks: current.tasks.filter((task) => !selectedTaskIds.includes(task.id)),
+    }))
+
+    try {
+      for (const task of tasksToDelete) {
+        await deleteTaskRemote(activeAccount, task)
+      }
+
+      if (metadataDoc) {
+        const nextMetadataDoc = {
+          ...metadataDoc,
+          manualTaskOrder: Object.fromEntries(
+            Object.entries(metadataDoc.manualTaskOrder).map(([collectionId, taskIds]) => [
+              collectionId,
+              (taskIds ?? []).filter((taskId) => !selectedTaskIds.includes(taskId)),
+            ]),
+          ),
+          updatedAt: new Date().toISOString(),
+        }
+        await saveMetadata(nextMetadataDoc, 'Tasks deleted.')
+      } else {
+        setMessage('Tasks deleted.')
+      }
+      clearSelection()
+    } catch (error) {
+      const failure = error instanceof Error ? error.message : 'Bulk delete failed.'
+      recordSyncIssue('Bulk delete', failure, activeAccount.id)
+      setMessage(failure)
+    }
+  }
+
+  async function handleBulkToggleComplete() {
+    const tasksToToggle = snapshot.tasks.filter((task) => selectedTaskIds.includes(task.id))
+    for (const task of tasksToToggle) {
+      await handleToggleTaskStatus(task)
+    }
+    clearSelection()
+  }
+
+  function handleTaskRowClick(event: React.MouseEvent, task: TaskItem) {
+    if (suppressTaskClickRef.current) {
+      suppressTaskClickRef.current = false
+      return
+    }
+
+    if (event.shiftKey) {
+      event.preventDefault()
+      selectTaskRange(task.id)
+      return
+    }
+
+    if (event.metaKey || event.ctrlKey) {
+      event.preventDefault()
+      toggleTaskSelection(task.id)
+      return
+    }
+
+    if (selectionMode === 'active') {
+      event.preventDefault()
+      toggleTaskSelection(task.id)
+      return
+    }
+
+    setKeyboardSelectedTaskId(task.id)
+    openTask(task.id)
+  }
+
   function handleTaskDragStart(event: React.PointerEvent<HTMLSpanElement>, task: TaskItem) {
     if (!canManualReorderTasks || task.status === 'completed' || activeView?.kind !== 'collection') {
       return
@@ -1268,8 +1488,14 @@ function App() {
       }
 
       suppressTaskClickRef.current = true
+      const taskIds =
+        selectedTaskIds.includes(press.taskId) && selectedTaskIds.length > 1
+          ? selectedTaskIds
+          : [press.taskId]
       setDragSession({
-        taskId: press.taskId,
+        taskIds,
+        primaryTaskId: press.taskId,
+        sourceCollectionId: activeView?.kind === 'collection' ? activeView.collectionId : taskIds[0] ? snapshot.tasks.find((task) => task.id === taskIds[0])?.collectionId ?? '' : '',
         pointerX: event.clientX,
         pointerY: event.clientY,
         offsetX: press.offsetX,
@@ -1293,7 +1519,7 @@ function App() {
       window.removeEventListener('pointerup', handlePointerEnd)
       window.removeEventListener('pointercancel', handlePointerEnd)
     }
-  }, [pendingTaskPress])
+  }, [activeView, pendingTaskPress, selectedTaskIds, snapshot.tasks])
 
   useEffect(() => {
     if (!pendingSettingsPress) {
@@ -1607,6 +1833,8 @@ function App() {
       startDateIsAllDay: taskDraft.startDateIsAllDay,
       dueDate: taskDraft.dueDate,
       dueDateIsAllDay: taskDraft.dueDateIsAllDay,
+      reminders: taskDraft.reminders,
+      unsupportedReminderBlocks: taskDraft.unsupportedReminderBlocks,
       completedAt: taskDraft.status === 'completed' ? taskDraft.completedAt ?? now : undefined,
       createdAt: snapshot.tasks.find((task) => task.id === taskDraft.id)?.createdAt ?? now,
       updatedAt: now,
@@ -1891,6 +2119,11 @@ function App() {
           : current,
       )
       updateDropIndex(event.clientY)
+      const hoveredCollectionId = Array.from(sidebarCollectionRefs.current.entries()).find(([, element]) => {
+        const rect = element.getBoundingClientRect()
+        return event.clientX >= rect.left && event.clientX <= rect.right && event.clientY >= rect.top && event.clientY <= rect.bottom
+      })?.[0]
+      setSidebarDropCollectionId(hoveredCollectionId)
     }
 
     function finishDrag(commit: boolean) {
@@ -1898,13 +2131,21 @@ function App() {
       const currentDragSession = dragSession
       setDragSession(undefined)
       setDropIndex(undefined)
+      setSidebarDropCollectionId(undefined)
+
+      if (!commit || !currentDragSession || !metadataDoc) {
+        return
+      }
+
+      if (sidebarDropCollectionId && sidebarDropCollectionId !== currentDragSession.sourceCollectionId) {
+        void moveTasksToCollectionRef.current(currentDragSession.taskIds, sidebarDropCollectionId)
+        return
+      }
 
       if (
-        commit &&
-        currentDragSession &&
-        metadataDoc &&
         activeView?.kind === 'collection' &&
-        isManualOrderingEnabled(activeView.collectionId)
+        isManualOrderingEnabled(activeView.collectionId) &&
+        currentDragSession.taskIds.length === 1
       ) {
         const collectionId = activeView.collectionId
         const openTaskIds = visibleTasks.filter((task) => task.status !== 'completed').map((task) => task.id)
@@ -1912,7 +2153,7 @@ function App() {
           ...(metadataDoc.manualTaskOrder[collectionId] ?? []).filter((id) => openTaskIds.includes(id)),
           ...openTaskIds.filter((id) => !(metadataDoc.manualTaskOrder[collectionId] ?? []).includes(id)),
         ]
-        const nextOrder = moveTaskIdToIndex(baseOrder, currentDragSession.taskId, currentDropIndex)
+        const nextOrder = moveTaskIdToIndex(baseOrder, currentDragSession.primaryTaskId, currentDropIndex)
         void saveMetadata(
           {
             ...metadataDoc,
@@ -1949,7 +2190,7 @@ function App() {
       window.removeEventListener('keydown', handleKeyDown)
       document.body.classList.remove('drag-active')
     }
-  }, [activeView, canManualReorderTasks, dragSession, dropIndex, isManualOrderingEnabled, metadataDoc, renderedOpenTasks, saveMetadata, visibleTasks])
+  }, [activeView, canManualReorderTasks, dragSession, dropIndex, isManualOrderingEnabled, metadataDoc, renderedOpenTasks, saveMetadata, sidebarDropCollectionId, visibleTasks])
 
   useEffect(() => {
     const activeSettingsDrag = settingsDragSession
@@ -2455,9 +2696,16 @@ function App() {
       <div key={collection.id} className="sidebar-folder">
         <div className={`sidebar-folder-toggle depth-${Math.min(depth, 3)} ${hasChildren ? 'has-children' : ''}`}>
           <button
+            ref={(element) => {
+              if (element) {
+                sidebarCollectionRefs.current.set(collection.id, element)
+              } else {
+                sidebarCollectionRefs.current.delete(collection.id)
+              }
+            }}
             className={`sidebar-link nested ${
               activeView?.kind === 'collection' && activeView.collectionId === collection.id ? 'active' : ''
-            }`}
+            } ${sidebarDropCollectionId === collection.id ? 'drop-target' : ''}`}
             style={collectionColorStyle(collection.color)}
             onClick={() => {
               setWorkspaceMode('tasks')
@@ -3213,6 +3461,20 @@ function App() {
               <div>
                 <p>{visibleTasks.length} tasks</p>
               </div>
+              <div className="row-control-group">
+                <button
+                  className={`ghost-button ${selectionMode === 'active' ? 'active' : ''}`}
+                  onClick={() => {
+                    if (selectionMode === 'active') {
+                      clearSelection()
+                    } else {
+                      setSelectionMode('active')
+                    }
+                  }}
+                >
+                  {selectionMode === 'active' ? 'Done selecting' : 'Select'}
+                </button>
+              </div>
               {activeView?.kind === 'collection' && (
                 <div className="row-control-group">
                   <button
@@ -3230,6 +3492,34 @@ function App() {
                 </div>
               )}
             </div>
+
+            {selectedTaskIds.length > 0 && (
+              <div className="bulk-toolbar">
+                <strong>{selectedTaskIds.length} selected</strong>
+                <button className="ghost-button" onClick={() => void handleBulkToggleComplete()}>
+                  Toggle complete
+                </button>
+                <button className="ghost-button danger" onClick={() => void handleBulkDeleteTasks()}>
+                  Delete
+                </button>
+                <select
+                  value=""
+                  onChange={(event) => {
+                    if (event.target.value) {
+                      void moveTasksToCollection(selectedTaskIds, event.target.value)
+                      event.target.value = ''
+                    }
+                  }}
+                >
+                  <option value="">Move to list...</option>
+                  {orderedCollectionOptions.map((collection) => (
+                    <option key={collection.id} value={collection.id}>
+                      {collection.label}
+                    </option>
+                  ))}
+                </select>
+              </div>
+            )}
 
             {visibleFilterTags.length > 0 && (
               <div className="view-tag-chips">
@@ -3281,16 +3571,18 @@ function App() {
                           task.status === 'completed' ? 'done' : ''
                         } ${canManualReorderTasks && task.status !== 'completed' ? 'reorderable' : ''} ${
                           keyboardSelectedTaskId === task.id ? 'keyboard-selected' : ''
+                        } ${selectedTaskIds.includes(task.id) ? 'multi-selected' : ''
                         }`}
-                        onClick={() => {
-                          if (suppressTaskClickRef.current) {
-                            suppressTaskClickRef.current = false
-                            return
-                          }
-                          setKeyboardSelectedTaskId(task.id)
-                          openTask(task.id)
-                        }}
+                        onClick={(event) => handleTaskRowClick(event, task)}
                       >
+                        {selectionMode === 'active' && (
+                          <input
+                            type="checkbox"
+                            checked={selectedTaskIds.includes(task.id)}
+                            onChange={() => toggleTaskSelection(task.id)}
+                            onClick={(event) => event.stopPropagation()}
+                          />
+                        )}
                         {canManualReorderTasks && task.status !== 'completed' && (
                           <span
                             className="task-drag-handle"
@@ -3353,19 +3645,27 @@ function App() {
                 >
                   <div className={`task-row ${task.id === selectedTaskId ? 'selected' : ''} done ${
                     keyboardSelectedTaskId === task.id ? 'keyboard-selected' : ''
-                  }`}>
+                  } ${selectedTaskIds.includes(task.id) ? 'multi-selected' : ''}`}>
+                    {selectionMode === 'active' && (
+                      <input
+                        type="checkbox"
+                        checked={selectedTaskIds.includes(task.id)}
+                        onChange={() => toggleTaskSelection(task.id)}
+                        onClick={(event) => event.stopPropagation()}
+                      />
+                    )}
                     <button
                       className={`task-check ${task.status === 'completed' ? 'checked' : ''}`}
-                      onClick={() => void handleToggleTaskStatus(task)}
+                      onClick={(event) => {
+                        event.stopPropagation()
+                        void handleToggleTaskStatus(task)
+                      }}
                     >
                       {task.status === 'completed' ? 'x' : ''}
                     </button>
                     <button
                       className="task-main"
-                      onClick={() => {
-                        setKeyboardSelectedTaskId(task.id)
-                        openTask(task.id)
-                      }}
+                      onClick={(event) => handleTaskRowClick(event, task)}
                     >
                       <span className="task-title">{task.title || 'Untitled task'}</span>
                       {task.tagIds.length > 0 && (
@@ -3406,6 +3706,9 @@ function App() {
                   </button>
                   <div className="task-main">
                     <span className="task-title">{draggedTask.title || 'Untitled task'}</span>
+                    {dragSession.taskIds.length > 1 && (
+                      <span className="task-inline-tag">+{dragSession.taskIds.length - 1} more</span>
+                    )}
                     {draggedTask.tagIds.length > 0 && (
                       <span className="task-tag-row">
                         {draggedTask.tagIds.map((tag) => (
@@ -3481,6 +3784,7 @@ function App() {
                   <div className="markdown-display" onClick={() => setDescriptionMode('edit')}>
                     <ReactMarkdown
                       remarkPlugins={[remarkGfm]}
+                      rehypePlugins={[rehypeRaw, rehypeSanitize]}
                       components={{
                         a: (props) => <a {...props} target="_blank" rel="noreferrer" />,
                       }}
@@ -3615,6 +3919,143 @@ function App() {
                       </label>
                     </div>
                   </div>
+                </div>
+
+                <div className="editor-reminders">
+                  <div className="simple-row">
+                    <div>
+                      <strong>Reminders</strong>
+                      <span>Multiple reminders are supported. Use absolute reminders or offsets before start/due.</span>
+                    </div>
+                    <button
+                      className="ghost-button"
+                      onClick={() =>
+                        setTaskDraft((current) => ({
+                          ...current,
+                          reminders: [
+                            ...current.reminders,
+                            {
+                              id: newId(),
+                              kind: current.dueDate ? 'relative' : 'absolute',
+                              ...(current.dueDate
+                                ? { anchor: 'due' as ReminderAnchor, minutesBefore: 30 }
+                                : { at: new Date().toISOString().slice(0, 16) }),
+                            } as TaskReminder,
+                          ],
+                        }))
+                      }
+                    >
+                      Add reminder
+                    </button>
+                  </div>
+
+                  {taskDraft.reminders.map((reminder) => (
+                    <div key={reminder.id} className="editor-chipbar reminder-row">
+                      <div className="editor-chipfield">
+                        <span>Type</span>
+                        <select
+                          value={reminder.kind}
+                          onChange={(event) =>
+                            setTaskDraft((current) => ({
+                              ...current,
+                              reminders: current.reminders.map((entry) =>
+                                entry.id !== reminder.id
+                                  ? entry
+                                  : event.target.value === 'absolute'
+                                    ? { id: entry.id, kind: 'absolute', at: new Date().toISOString().slice(0, 16) }
+                                    : { id: entry.id, kind: 'relative', anchor: 'due', minutesBefore: 30 },
+                              ),
+                            }))
+                          }
+                        >
+                          <option value="relative">Before date</option>
+                          <option value="absolute">Exact date/time</option>
+                        </select>
+                      </div>
+
+                      {reminder.kind === 'absolute' ? (
+                        <div className="editor-chipfield wide">
+                          <span>When</span>
+                          <input
+                            type="datetime-local"
+                            value={normalizeDateInput(reminder.at)}
+                            onChange={(event) =>
+                              setTaskDraft((current) => ({
+                                ...current,
+                                reminders: current.reminders.map((entry) =>
+                                  entry.id === reminder.id ? { ...entry, at: event.target.value } : entry,
+                                ),
+                              }))
+                            }
+                          />
+                        </div>
+                      ) : (
+                        <>
+                          <div className="editor-chipfield">
+                            <span>Anchor</span>
+                            <select
+                              value={reminder.anchor}
+                              onChange={(event) =>
+                                setTaskDraft((current) => ({
+                                  ...current,
+                                  reminders: current.reminders.map((entry) =>
+                                    entry.id === reminder.id
+                                      ? { ...entry, anchor: event.target.value as ReminderAnchor }
+                                      : entry,
+                                  ),
+                                }))
+                              }
+                            >
+                              <option value="start">Start</option>
+                              <option value="due">Due</option>
+                            </select>
+                          </div>
+                          <div className="editor-chipfield">
+                            <span>Minutes before</span>
+                            <input
+                              type="number"
+                              min="0"
+                              value={reminder.minutesBefore}
+                              onChange={(event) =>
+                                setTaskDraft((current) => ({
+                                  ...current,
+                                  reminders: current.reminders.map((entry) =>
+                                    entry.id === reminder.id
+                                      ? { ...entry, minutesBefore: Number.parseInt(event.target.value || '0', 10) }
+                                      : entry,
+                                  ),
+                                }))
+                              }
+                            />
+                          </div>
+                        </>
+                      )}
+
+                      <button
+                        className="ghost-button danger"
+                        onClick={() =>
+                          setTaskDraft((current) => ({
+                            ...current,
+                            reminders: current.reminders.filter((entry) => entry.id !== reminder.id),
+                          }))
+                        }
+                      >
+                        Remove
+                      </button>
+                    </div>
+                  ))}
+
+                  {taskDraft.reminders.length === 0 && (
+                    <div className="simple-row">
+                      <span>No reminders configured.</span>
+                    </div>
+                  )}
+
+                  {taskDraft.unsupportedReminderBlocks && taskDraft.unsupportedReminderBlocks.length > 0 && (
+                    <div className="simple-row">
+                      <span>{taskDraft.unsupportedReminderBlocks.length} reminder blocks from other clients will be preserved unchanged.</span>
+                    </div>
+                  )}
                 </div>
               </div>
 

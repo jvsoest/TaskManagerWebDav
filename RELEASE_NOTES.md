@@ -38,6 +38,13 @@
 - Added keyboard navigation between smart lists and lists with `g l` for a searchable quick switcher and `[` / `]` for previous/next view navigation in sidebar order.
 - Improved keyboard shortcut reliability on Windows/Edge by matching physical keys more robustly, allowing bracket navigation on layouts that use `AltGr`, and making `Escape` close the task editor consistently.
 
+### Task interaction and reminders
+- Completed the markdown description preview with sanitized GitHub-flavored markdown rendering, including raw HTML sanitization and broader styling coverage.
+- Added CalDAV reminder support with multiple task reminders, `VALARM` parsing/serialization, and reminder-driven browser notifications.
+- Added multi-select task actions for complete, delete, and move.
+- Added support for dragging tasks onto sidebar lists to move them between lists.
+- Changed visible tag chips so they reflect only the tasks currently visible in the active list or smart list.
+
 ### Verification
 - `npm run build`
 - `npm run lint`

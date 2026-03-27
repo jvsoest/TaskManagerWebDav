@@ -263,6 +263,10 @@ button {
   box-shadow: 0 0 0 1px rgba(219, 76, 63, 0.08) inset;
 }
 
+.sidebar-link.drop-target {
+  box-shadow: inset 0 0 0 2px rgba(219, 76, 63, 0.18);
+}
+
 .sidebar-link strong,
 .account-switcher strong {
   font-size: 0.74rem;
@@ -538,6 +542,10 @@ button {
   background: #fff9f8;
 }
 
+.task-row.multi-selected {
+  box-shadow: inset 0 0 0 2px rgba(219, 76, 63, 0.18);
+}
+
 .task-row.keyboard-selected {
   box-shadow: 0 0 0 2px rgba(219, 76, 63, 0.18);
 }
@@ -639,6 +647,14 @@ button {
   line-height: 1.2;
 }
 
+.bulk-toolbar {
+  display: flex;
+  gap: 10px;
+  align-items: center;
+  flex-wrap: wrap;
+  margin-bottom: 12px;
+}
+
 .task-side {
   display: flex;
   gap: 10px;
@@ -724,6 +740,15 @@ button {
   color: var(--muted);
   text-transform: uppercase;
   letter-spacing: 0.04em;
+}
+
+.editor-reminders {
+  display: grid;
+  gap: 10px;
+}
+
+.reminder-row {
+  align-items: end;
 }
 
 .tag-grid {
@@ -901,6 +926,44 @@ button {
 
 .markdown-display a:hover {
   text-decoration: underline;
+}
+
+.markdown-display em {
+  font-style: italic;
+}
+
+.markdown-display strong {
+  font-weight: 700;
+}
+
+.markdown-display del {
+  text-decoration: line-through;
+}
+
+.markdown-display hr {
+  border: 0;
+  border-top: 1px solid var(--line);
+  margin: 12px 0;
+}
+
+.markdown-display img {
+  max-width: 100%;
+  border-radius: 10px;
+}
+
+.markdown-display h5,
+.markdown-display h6 {
+  margin: 0 0 10px;
+}
+
+.markdown-display sup {
+  font-size: 0.75em;
+}
+
+.markdown-display section[data-footnotes] {
+  margin-top: 16px;
+  padding-top: 12px;
+  border-top: 1px solid var(--line);
 }
 
 .markdown-display table {
