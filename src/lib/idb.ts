@@ -1,4 +1,4 @@
-import type { Account, AppSnapshot } from '../types'
+import type { Account, AppSnapshot, SmartList, TaskItem, TaskMutation } from '../types'
 
 const DB_NAME = 'taskmanager-webdav'
 const DB_VERSION = 3
@@ -6,6 +6,33 @@ const DB_VERSION = 3
 const STORES = ['accounts', 'collections', 'tasks', 'smartLists', 'metadataDocs', 'syncLogs', 'settings', 'queuedMutations'] as const
 
 let openPromise: Promise<IDBDatabase> | undefined
+
+function normalizeTask(task: TaskItem): TaskItem {
+  return {
+    ...task,
+    reminders: Array.isArray(task.reminders) ? task.reminders : [],
+    unsupportedReminderBlocks: Array.isArray(task.unsupportedReminderBlocks)
+      ? task.unsupportedReminderBlocks
+      : [],
+    tagIds: Array.isArray(task.tagIds) ? task.tagIds : [],
+    startDateIsAllDay: task.startDateIsAllDay ?? true,
+    dueDateIsAllDay: task.dueDateIsAllDay ?? true,
+  }
+}
+
+function normalizeSmartList(smartList: SmartList): SmartList {
+  return {
+    ...smartList,
+    showCompleted: smartList.showCompleted === true,
+  }
+}
+
+function normalizeQueuedMutation(mutation: TaskMutation): TaskMutation {
+  return {
+    ...mutation,
+    task: normalizeTask(mutation.task),
+  }
+}
 
 function openDb(): Promise<IDBDatabase> {
   if (openPromise) {
@@ -80,8 +107,8 @@ export async function loadSnapshot(): Promise<AppSnapshot> {
       proxyUrl: account.proxyUrl ?? '',
     })),
     collections,
-    tasks,
-    smartLists,
+    tasks: (tasks as TaskItem[]).map(normalizeTask),
+    smartLists: (smartLists as SmartList[]).map(normalizeSmartList),
     metadataDocs,
     syncLogs,
     settings: (settings as Array<{ id: string; autoSyncEnabled?: boolean; autoSyncIntervalMinutes?: number }>)[0]
@@ -95,7 +122,7 @@ export async function loadSnapshot(): Promise<AppSnapshot> {
           autoSyncEnabled: true,
           autoSyncIntervalMinutes: 15,
         },
-    queuedMutations,
+    queuedMutations: (queuedMutations as TaskMutation[]).map(normalizeQueuedMutation),
   }
 }
 

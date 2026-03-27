@@ -44,6 +44,7 @@
 - Added multi-select task actions for complete, delete, and move.
 - Added support for dragging tasks onto sidebar lists to move them between lists.
 - Changed visible tag chips so they reflect only the tasks currently visible in the active list or smart list.
+- Fixed editing existing tasks after the reminder feature shipped by normalizing older cached tasks and queued mutations that did not yet contain reminder fields.
 
 ### Verification
 - `npm run build`
