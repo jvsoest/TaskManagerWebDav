@@ -320,6 +320,17 @@ export function getSmartListCount(
   return tasks.filter((task) => taskMatchesSmartList(task, smartList, metadataDoc, collections)).length
 }
 
+export function smartListRequiresCompletedVisibility(
+  smartList: Pick<SmartList, 'definition' | 'ordering'>,
+): boolean {
+  const definition = smartList.definition.toLowerCase()
+  return (
+    /\bcompleted:(today|last\d+)\b/.test(definition) ||
+    /(^|[^!\w-])status:completed(?=$|[)\s&|])/i.test(definition) ||
+    smartList.ordering.field === 'completedAt'
+  )
+}
+
 function compareStrings(left: string | undefined, right: string | undefined, direction: SortDirection): number {
   const leftValue = left ?? ''
   const rightValue = right ?? ''
@@ -334,10 +345,18 @@ function compareNumbers(left: number | undefined, right: number | undefined, dir
   return direction === 'asc' ? result : -result
 }
 
+function completedDateCandidate(task: TaskItem): string | undefined {
+  if (task.completedAt) {
+    return task.completedAt
+  }
+
+  return task.status === 'completed' ? task.updatedAt : undefined
+}
+
 function compareByOrdering(left: TaskItem, right: TaskItem, ordering: TaskOrdering): number {
   switch (ordering.field) {
     case 'completedAt':
-      return compareStrings(left.completedAt, right.completedAt, ordering.direction)
+      return compareStrings(completedDateCandidate(left), completedDateCandidate(right), ordering.direction)
     case 'priority':
       return compareNumbers(left.priority, right.priority, ordering.direction)
     case 'title':
@@ -637,11 +656,12 @@ function taskMatchesNamedDate(task: TaskItem, value: string, field: SmartDateFie
 }
 
 function taskMatchesCompletedDate(task: TaskItem, value: string): boolean {
-  if (!task.completedAt) {
+  const candidate = completedDateCandidate(task)
+  if (!candidate) {
     return false
   }
 
-  const completedAt = new Date(task.completedAt)
+  const completedAt = new Date(candidate)
   if (Number.isNaN(completedAt.getTime())) {
     return false
   }

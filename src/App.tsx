@@ -12,6 +12,7 @@ import {
   expandTreeIds,
   extractHashtags,
   getSmartListCount,
+  smartListRequiresCompletedVisibility,
   normalizeOrdering,
   sortTasks,
   taskMatchesFilter,
@@ -862,7 +863,7 @@ function App() {
   )
   const currentViewShowCompleted =
     activeView?.kind === 'smart'
-      ? activeSmartList?.showCompleted === true
+      ? (activeSmartList?.showCompleted === true || (activeSmartList ? smartListRequiresCompletedVisibility(activeSmartList) : false))
       : activeView?.kind === 'collection'
         ? metadataDoc?.taskListShowCompleted[activeView.collectionId] === true
         : false

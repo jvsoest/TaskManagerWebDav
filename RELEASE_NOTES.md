@@ -8,6 +8,7 @@
 - Fixed iPhone task-row overflow by truncating long task titles and keeping date/list metadata inside the task card.
 - New sublists now inherit the color of their parent list when created.
 - Smart lists can now filter by completion date with `completed:today`, `completed:last7`, and `completed:last30`, and can sort by completion date.
+- Smart lists using completion-date filters now automatically show completed tasks, and fall back to `LAST-MODIFIED` when providers like Cirrux strip the standard `COMPLETED` timestamp.
 - Added system-driven dark mode support based on the OS/browser color-scheme preference.
 - Improved dark-mode readability in the sidebar sync/account area and the settings account/list selectors, and toned down overly bright white surfaces there.
 - Dark mode now also tones down the task-list container and the task-editor description panel/markdown surfaces.
