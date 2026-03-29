@@ -148,6 +148,11 @@ button {
   padding: 10px 12px;
 }
 
+.settings-form input,
+.settings-form select {
+  background: var(--surface-muted);
+}
+
 .sidebar-search input {
   background: var(--sidebar-search-bg);
   border-color: var(--sidebar-search-line);
@@ -278,12 +283,12 @@ button {
 
 .sidebar-link:hover,
 .account-switcher:hover {
-  background: rgba(255, 255, 255, 0.78);
+  background: color-mix(in srgb, var(--surface) 78%, transparent);
 }
 
 .sidebar-link.active,
 .account-switcher.active {
-  background: #fff1ed;
+  background: var(--accent-soft);
   color: var(--accent);
   box-shadow: 0 0 0 1px rgba(219, 76, 63, 0.08) inset;
 }
@@ -313,6 +318,11 @@ button {
 .account-switcher span {
   font-size: 0.88rem;
   line-height: 1.2;
+}
+
+.account-switcher span,
+.status-bar {
+  color: color-mix(in srgb, var(--text) 64%, var(--muted));
 }
 
 .sidebar-link.nested span:first-of-type {
@@ -402,8 +412,8 @@ button {
 
 .account-switcher {
   padding: 10px;
-  background: rgba(255, 255, 255, 0.82);
-  border: 1px solid #e8ded3;
+  background: var(--surface-muted);
+  border: 1px solid var(--line);
   border-radius: 12px;
 }
 
@@ -1073,6 +1083,7 @@ button {
   gap: 12px;
   padding: 12px 28px 18px;
   font-size: 0.88rem;
+  background: color-mix(in srgb, var(--surface-muted) 72%, transparent);
 }
 
 .modal-shell {
@@ -1134,7 +1145,7 @@ button {
   padding: 14px 16px;
   border: 1px solid var(--line);
   border-radius: 12px;
-  background: var(--surface);
+  background: var(--surface-muted);
   text-align: left;
 }
 
@@ -1148,8 +1159,8 @@ button {
 }
 
 .settings-nav-button.active {
-  border-color: #f4b5ae;
-  background: #fff5f3;
+  border-color: color-mix(in srgb, var(--accent) 30%, var(--line));
+  background: var(--accent-soft);
 }
 
 .settings-panel,
@@ -1166,7 +1177,7 @@ button {
   padding: 20px;
   border: 1px solid var(--line);
   border-radius: 14px;
-  background: var(--surface);
+  background: var(--surface-muted);
 }
 
 .settings-page-header {
@@ -1246,7 +1257,7 @@ button {
   padding: 10px 12px;
   border: 1px solid var(--line);
   border-radius: 8px;
-  background: var(--surface);
+  background: var(--surface-muted);
 }
 
 .simple-row > div {
@@ -1334,7 +1345,7 @@ button {
 
 .assign-actions select {
   min-width: 160px;
-  background: var(--surface);
+  background: var(--surface-muted);
   border: 1px solid var(--line);
   border-radius: 8px;
   padding: 8px 10px;

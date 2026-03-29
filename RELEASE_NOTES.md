@@ -9,6 +9,7 @@
 - New sublists now inherit the color of their parent list when created.
 - Smart lists can now filter by completion date with `completed:today`, `completed:last7`, and `completed:last30`, and can sort by completion date.
 - Added system-driven dark mode support based on the OS/browser color-scheme preference.
+- Improved dark-mode readability in the sidebar sync/account area and the settings account/list selectors, and toned down overly bright white surfaces there.
 
 ## 2026-03-25
 
