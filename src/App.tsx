@@ -508,6 +508,11 @@ function App() {
     toggleTaskStatus: () => Promise.resolve(),
   })
   const deferredSearch = useDeferredValue(searchText)
+  const buildTimestampLabel = useMemo(() => {
+    const parsed = new Date(__BUILD_TIMESTAMP__)
+    return Number.isNaN(parsed.getTime()) ? __BUILD_TIMESTAMP__ : parsed.toLocaleString()
+  }, [])
+  const buildCommitLabel = __BUILD_COMMIT__
 
   useEffect(() => {
     void loadSnapshot().then((loaded) => {
@@ -3368,6 +3373,19 @@ function App() {
                           <button className="ghost-button danger" onClick={() => void handleClearLocalCache()} disabled={busy}>
                             Clear local cache
                           </button>
+                        </div>
+                      </div>
+                    </div>
+
+                    <div className="settings-block">
+                      <div className="section-title-row">
+                        <h4>Build</h4>
+                      </div>
+                      <div className="simple-row">
+                        <div>
+                          <strong>Build date and time</strong>
+                          <span>{buildTimestampLabel}</span>
+                          <span>Commit {buildCommitLabel}</span>
                         </div>
                       </div>
                     </div>
