@@ -46,6 +46,7 @@
 - Changed visible tag chips so they reflect only the tasks currently visible in the active list or smart list.
 - Fixed editing existing tasks after the reminder feature shipped by normalizing older cached tasks and queued mutations that did not yet contain reminder fields.
 - Fixed the Safari-sensitive clear-cache/reconnect flow by preserving reconnect settings, unregistering service workers during a full local reset, and reloading back into the account screen with proxy settings restored.
+- Fixed first-time reconnect after a cache reset so a successful account login now switches back into the task workspace instead of leaving the user stranded in settings.
 
 ### Verification
 - `npm run build`

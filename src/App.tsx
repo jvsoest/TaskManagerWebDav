@@ -1824,6 +1824,12 @@ function App() {
           ],
         }
       })
+      if (isFirstSync) {
+        setActiveAccountId(account.id)
+        setWorkspaceMode('tasks')
+        setSettingsSection('accounts')
+        setIsSidebarOpen(false)
+      }
       setMessage(isFirstSync ? 'Account connected and synced.' : `${account.label} is up to date.`)
     } catch (error) {
       const failure = error instanceof Error ? error.message : 'Sync failed.'
