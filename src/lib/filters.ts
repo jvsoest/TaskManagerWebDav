@@ -713,10 +713,10 @@ function parseSmartDateTerm(value: string): { field: SmartDateField; preset: str
     return undefined
   }
 
-  if (match[4]) {
+  if (match[3]) {
     return {
       field: 'completed',
-      preset: match[5].toLowerCase(),
+      preset: match[4].toLowerCase(),
     }
   }
 
