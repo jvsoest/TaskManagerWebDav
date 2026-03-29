@@ -45,6 +45,7 @@
 - Added support for dragging tasks onto sidebar lists to move them between lists.
 - Changed visible tag chips so they reflect only the tasks currently visible in the active list or smart list.
 - Fixed editing existing tasks after the reminder feature shipped by normalizing older cached tasks and queued mutations that did not yet contain reminder fields.
+- Fixed the Safari-sensitive clear-cache/reconnect flow by preserving reconnect settings, unregistering service workers during a full local reset, and reloading back into the account screen with proxy settings restored.
 
 ### Verification
 - `npm run build`

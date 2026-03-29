@@ -20,6 +20,7 @@ import {
 } from './lib/filters'
 import { clearLocalCache, loadSnapshot, saveSnapshot } from './lib/idb'
 import { notifyDueTasks } from './lib/notifications'
+import { unregisterServiceWorkers } from './lib/pwa'
 import {
   createTaskCollection,
   deleteTaskCollection,
@@ -135,6 +136,9 @@ const emptyConnection: AccountConnectionInput = {
   username: '',
   password: '',
 }
+
+const CACHE_RESET_FORM_KEY = 'taskmanagerwebdav:cache-reset-form'
+const CACHE_RESET_MESSAGE_KEY = 'taskmanagerwebdav:cache-reset-message'
 
 const statuses: TaskStatus[] = ['needs-action', 'in-process', 'completed', 'cancelled']
 const orderingFields: Array<{ value: TaskOrderField; label: string }> = [
@@ -510,6 +514,40 @@ function App() {
       setSnapshot(loaded)
       setActiveAccountId(loaded.accounts[0]?.id)
       setHydrated(true)
+
+      if (typeof window === 'undefined') {
+        return
+      }
+
+      const pendingForm = window.sessionStorage.getItem(CACHE_RESET_FORM_KEY)
+      if (pendingForm) {
+        try {
+          const parsed = JSON.parse(pendingForm) as Partial<AccountConnectionInput>
+          setConnectionForm((current) => ({
+            ...current,
+            label: parsed.label ?? '',
+            serverUrl: parsed.serverUrl ?? '',
+            connectionMode: parsed.connectionMode === 'proxy' ? 'proxy' : 'direct',
+            proxyUrl: parsed.proxyUrl ?? '',
+            username: parsed.username ?? '',
+            password: '',
+          }))
+          setWorkspaceMode('settings')
+          setSettingsSection('accounts')
+          setActiveAccountId(undefined)
+          setActiveView(undefined)
+        } catch {
+          // Ignore malformed reconnect hints.
+        } finally {
+          window.sessionStorage.removeItem(CACHE_RESET_FORM_KEY)
+        }
+      }
+
+      const pendingMessage = window.sessionStorage.getItem(CACHE_RESET_MESSAGE_KEY)
+      if (pendingMessage) {
+        setMessage(pendingMessage)
+        window.sessionStorage.removeItem(CACHE_RESET_MESSAGE_KEY)
+      }
     })
   }, [])
 
@@ -2625,12 +2663,38 @@ function App() {
     setMessage('Clearing local cache...')
 
     try {
+      const reconnectForm: AccountConnectionInput = activeAccount
+        ? {
+            label: activeAccount.label,
+            serverUrl: activeAccount.serverUrl,
+            connectionMode: activeAccount.connectionMode,
+            proxyUrl: activeAccount.proxyUrl ?? '',
+            username: activeAccount.username,
+            password: '',
+          }
+        : {
+            ...connectionForm,
+            password: '',
+          }
+
+      if (typeof window !== 'undefined') {
+        window.sessionStorage.setItem(CACHE_RESET_FORM_KEY, JSON.stringify(reconnectForm))
+        window.sessionStorage.setItem(
+          CACHE_RESET_MESSAGE_KEY,
+          reconnectForm.connectionMode === 'proxy'
+            ? 'Local cache cleared. Proxy settings were restored. Re-enter the password and reconnect.'
+            : 'Local cache cleared. Re-enter the password and reconnect.',
+        )
+      }
+
       await clearLocalCache()
 
       if ('caches' in window) {
         const cacheKeys = await window.caches.keys()
         await Promise.all(cacheKeys.map((key) => window.caches.delete(key)))
       }
+
+      await unregisterServiceWorkers()
 
       replaceSnapshot(emptySnapshot)
       setActiveAccountId(undefined)
@@ -2643,10 +2707,19 @@ function App() {
       setSmartDraftDefinition('')
       setSearchText('')
       setCollapsedCollections([])
-      setConnectionForm(emptyConnection)
+      setConnectionForm({
+        ...reconnectForm,
+        password: '',
+      })
       setListDraft({ name: '', parentId: '' })
       setWorkspaceMode('settings')
       setSettingsSection('accounts')
+
+      if (typeof window !== 'undefined') {
+        window.location.replace(window.location.href)
+        return
+      }
+
       setMessage('Local cache cleared. Reconnect an account to sync again.')
     } catch (error) {
       setMessage(error instanceof Error ? error.message : 'Failed to clear local cache.')
