@@ -480,6 +480,7 @@ button {
 .workspace-surface {
   min-width: 0;
   padding: 24px 28px;
+  background: var(--bg);
 }
 
 .workspace-title-row {
@@ -539,7 +540,7 @@ button {
 }
 
 .task-rows {
-  background: #f2f3f5;
+  background: var(--surface-strong);
   border: 1px solid var(--line);
   border-radius: 12px;
   padding: 6px;
@@ -612,7 +613,7 @@ button {
   height: 22px;
   margin: 6px 0;
   border-radius: 12px;
-  background: #f2f3f5;
+  background: var(--surface-strong);
   box-shadow: inset 0 0 0 1px rgba(219, 76, 63, 0.18);
 }
 
@@ -865,7 +866,7 @@ button {
 .description-panel {
   border: 1px solid var(--line);
   border-radius: 14px;
-  background: linear-gradient(180deg, #fffdfb 0%, #fff 100%);
+  background: var(--surface);
   overflow: hidden;
 }
 
@@ -876,7 +877,7 @@ button {
   gap: 12px;
   padding: 10px 12px;
   border-bottom: 1px solid var(--line);
-  background: rgba(250, 250, 250, 0.9);
+  background: var(--surface-muted);
 }
 
 .description-header > div {
@@ -936,6 +937,7 @@ button {
   min-height: 88px;
   padding: 14px 16px 16px;
   line-height: 1.55;
+  background: var(--surface);
 }
 
 .markdown-display:empty::before {
@@ -972,21 +974,21 @@ button {
 
 .markdown-display blockquote {
   padding-left: 12px;
-  border-left: 3px solid #eadfd5;
-  color: #4b5563;
+  border-left: 3px solid var(--line-strong);
+  color: var(--muted);
 }
 
 .markdown-display code {
   padding: 0.12rem 0.34rem;
   border-radius: 6px;
-  background: #f3f4f6;
+  background: var(--surface-strong);
   font-size: 0.88em;
 }
 
 .markdown-display pre {
   padding: 12px;
   border-radius: 10px;
-  background: #f6f7f8;
+  background: var(--surface-muted);
   overflow: auto;
 }
 
@@ -1057,7 +1059,7 @@ button {
 }
 
 .markdown-display th {
-  background: #f8f8f8;
+  background: var(--surface-strong);
   font-weight: 600;
 }
 
