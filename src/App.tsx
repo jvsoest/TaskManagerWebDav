@@ -1158,12 +1158,12 @@ function App() {
   }
 
   function updateAccount(accountId: string, patch: Partial<Account>) {
-    replaceSnapshot({
-      ...snapshot,
-      accounts: snapshot.accounts.map((account) =>
+    replaceSnapshotWith((current) => ({
+      ...current,
+      accounts: current.accounts.map((account) =>
         account.id === accountId ? { ...account, ...patch } : account,
       ),
-    })
+    }))
   }
 
   function updateSettings(patch: Partial<AppSettings>) {
@@ -1750,12 +1750,18 @@ function App() {
         syncState: 'syncing',
       }
 
-      replaceSnapshot({
-        ...snapshot,
-        accounts: [...snapshot.accounts, account],
-        collections: [...snapshot.collections, ...discovery.collections],
-        metadataDocs: [...snapshot.metadataDocs, createDefaultMetadata(accountId)],
-      })
+      replaceSnapshotWith((current) => ({
+        ...current,
+        accounts: [...current.accounts.filter((entry) => entry.id !== account.id), account],
+        collections: [
+          ...current.collections.filter((entry) => entry.accountId !== account.id),
+          ...discovery.collections,
+        ],
+        metadataDocs: [
+          ...current.metadataDocs.filter((entry) => entry.accountId !== account.id),
+          createDefaultMetadata(accountId),
+        ],
+      }))
       setActiveAccountId(accountId)
       setActiveView(undefined)
       setConnectionForm(emptyConnection)
