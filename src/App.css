@@ -925,7 +925,7 @@ button {
 
 .switcher-row.active {
   border-color: color-mix(in srgb, var(--accent) 35%, var(--line));
-  background: #fff4ef;
+  background: var(--accent-soft);
 }
 
 .switcher-row span {
