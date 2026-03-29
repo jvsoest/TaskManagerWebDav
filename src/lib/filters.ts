@@ -160,7 +160,7 @@ export function parseSmartListPayload(value: string): {
 }
 
 function isTaskOrderField(value: unknown): value is TaskOrderField {
-  return ['dueDate', 'startDate', 'priority', 'title', 'createdAt', 'updatedAt', 'status'].includes(
+  return ['dueDate', 'startDate', 'completedAt', 'priority', 'title', 'createdAt', 'updatedAt', 'status'].includes(
     String(value),
   )
 }
@@ -336,6 +336,8 @@ function compareNumbers(left: number | undefined, right: number | undefined, dir
 
 function compareByOrdering(left: TaskItem, right: TaskItem, ordering: TaskOrdering): number {
   switch (ordering.field) {
+    case 'completedAt':
+      return compareStrings(left.completedAt, right.completedAt, ordering.direction)
     case 'priority':
       return compareNumbers(left.priority, right.priority, ordering.direction)
     case 'title':
@@ -598,7 +600,7 @@ function taskMatchesStatusAlias(task: TaskItem, value: string): boolean {
   return task.status === normalized
 }
 
-type SmartDateField = 'start' | 'due' | 'either'
+type SmartDateField = 'start' | 'due' | 'completed' | 'either'
 
 function candidateDateForField(task: TaskItem, field: SmartDateField): string | undefined {
   if (field === 'start') {
@@ -607,10 +609,17 @@ function candidateDateForField(task: TaskItem, field: SmartDateField): string | 
   if (field === 'due') {
     return task.dueDate
   }
+  if (field === 'completed') {
+    return task.completedAt
+  }
   return task.dueDate ?? task.startDate
 }
 
 function taskMatchesNamedDate(task: TaskItem, value: string, field: SmartDateField = 'either'): boolean {
+  if (field === 'completed') {
+    return taskMatchesCompletedDate(task, value)
+  }
+
   const upcomingWindow = parseUpcomingDays(value)
   const candidate = candidateDateForField(task, field)
 
@@ -627,6 +636,37 @@ function taskMatchesNamedDate(task: TaskItem, value: string, field: SmartDateFie
   })
 }
 
+function taskMatchesCompletedDate(task: TaskItem, value: string): boolean {
+  if (!task.completedAt) {
+    return false
+  }
+
+  const completedAt = new Date(task.completedAt)
+  if (Number.isNaN(completedAt.getTime())) {
+    return false
+  }
+
+  const today = new Date()
+  today.setHours(0, 0, 0, 0)
+
+  if (value === 'today') {
+    const end = new Date(today)
+    end.setHours(23, 59, 59, 999)
+    return completedAt >= today && completedAt <= end
+  }
+
+  const historicalWindow = parsePastDays(value)
+  if (historicalWindow !== undefined) {
+    const start = new Date(today)
+    start.setDate(start.getDate() - (historicalWindow - 1))
+    const end = new Date(today)
+    end.setHours(23, 59, 59, 999)
+    return completedAt >= start && completedAt <= end
+  }
+
+  return false
+}
+
 function parseUpcomingDays(value: string): number | undefined {
   const match = /^next(\d+)$/i.exec(value.trim())
   if (!match) {
@@ -637,10 +677,27 @@ function parseUpcomingDays(value: string): number | undefined {
   return Number.isFinite(days) && days > 0 ? days : undefined
 }
 
-function parseSmartDateTerm(value: string): { field: SmartDateField; preset: string } | undefined {
-  const match = /^(start|due|end):(today|overdue|next\d+)$/i.exec(value.trim())
+function parsePastDays(value: string): number | undefined {
+  const match = /^last(\d+)$/i.exec(value.trim())
   if (!match) {
     return undefined
+  }
+
+  const days = Number.parseInt(match[1], 10)
+  return Number.isFinite(days) && days > 0 ? days : undefined
+}
+
+function parseSmartDateTerm(value: string): { field: SmartDateField; preset: string } | undefined {
+  const match = /^(start|due|end):(today|overdue|next\d+)$|^(completed):(today|last\d+)$/i.exec(value.trim())
+  if (!match) {
+    return undefined
+  }
+
+  if (match[4]) {
+    return {
+      field: 'completed',
+      preset: match[5].toLowerCase(),
+    }
   }
 
   return {

@@ -144,6 +144,7 @@ const statuses: TaskStatus[] = ['needs-action', 'in-process', 'completed', 'canc
 const orderingFields: Array<{ value: TaskOrderField; label: string }> = [
   { value: 'dueDate', label: 'Due date' },
   { value: 'startDate', label: 'Start date' },
+  { value: 'completedAt', label: 'Completed' },
   { value: 'priority', label: 'Priority' },
   { value: 'title', label: 'Title' },
   { value: 'createdAt', label: 'Created' },
@@ -317,6 +318,29 @@ function displayDate(value?: string): string {
   }).format(date)
 }
 
+function isOverdueDueDate(task: Pick<TaskItem, 'dueDate' | 'dueDateIsAllDay' | 'status'>): boolean {
+  if (!task.dueDate || task.status === 'completed') {
+    return false
+  }
+
+  const dueDate = new Date(task.dueDate)
+  if (Number.isNaN(dueDate.getTime())) {
+    return false
+  }
+
+  if (task.dueDateIsAllDay ?? task.dueDate.length <= 10) {
+    const today = new Date()
+    today.setHours(0, 0, 0, 0)
+    return dueDate < today
+  }
+
+  return dueDate.getTime() < Date.now()
+}
+
+function isPlannedTask(task: Pick<TaskItem, 'startDate' | 'dueDate'>): boolean {
+  return Boolean(task.startDate || task.dueDate)
+}
+
 function syncLabel(value?: string): string {
   if (!value) {
     return 'Not synced yet'
@@ -457,6 +481,7 @@ function App() {
   const [searchText, setSearchText] = useState('')
   const [selectedViewTags, setSelectedViewTags] = useState<string[]>([])
   const [selectionMode, setSelectionMode] = useState<SelectionMode>('inactive')
+  const [isPlannedSectionCollapsed, setIsPlannedSectionCollapsed] = useState(true)
   const [selectedTaskIds, setSelectedTaskIds] = useState<string[]>([])
   const [selectionAnchorTaskId, setSelectionAnchorTaskId] = useState<string>()
   const [busy, setBusy] = useState(false)
@@ -930,6 +955,23 @@ function App() {
     return openVisibleTasks.filter((task) => !dragSession.taskIds.includes(task.id))
   }, [canManualReorderTasks, dragSession, openVisibleTasks])
   const renderedCompletedTasks = completedVisibleTasks
+  const shouldSplitPlannedTasks = activeView?.kind === 'collection'
+  const plannedOpenTasks = useMemo(
+    () => (shouldSplitPlannedTasks ? renderedOpenTasks.filter((task) => isPlannedTask(task)) : []),
+    [renderedOpenTasks, shouldSplitPlannedTasks],
+  )
+  const primaryOpenTasks = useMemo(
+    () => (shouldSplitPlannedTasks ? renderedOpenTasks.filter((task) => !isPlannedTask(task)) : renderedOpenTasks),
+    [renderedOpenTasks, shouldSplitPlannedTasks],
+  )
+  const visibleRenderedTasks = useMemo(
+    () => [
+      ...primaryOpenTasks,
+      ...(isPlannedSectionCollapsed ? [] : plannedOpenTasks),
+      ...renderedCompletedTasks,
+    ],
+    [isPlannedSectionCollapsed, plannedOpenTasks, primaryOpenTasks, renderedCompletedTasks],
+  )
   const draggedTask = dragSession ? visibleTasks.find((task) => task.id === dragSession.primaryTaskId) : undefined
   const draggedSettingsCollection =
     settingsDragSession?.kind === 'collection'
@@ -954,20 +996,141 @@ function App() {
     setDescriptionMode('edit')
   }, [activeAccountId, preferredTaskCollectionId])
 
+  function renderTaskRow(task: TaskItem, options?: { dragShell?: boolean; dropIndex?: number; index?: number; preview?: boolean }) {
+    const preview = options?.preview === true
+    const collection = taskCollections.find((entry) => entry.id === task.collectionId)
+    const isSelected = task.id === selectedTaskId
+    const isKeyboardSelected = keyboardSelectedTaskId === task.id
+    const isMultiSelected = selectedTaskIds.includes(task.id)
+    const isReorderable = canManualReorderTasks && task.status !== 'completed' && !isPlannedTask(task)
+    const isOverdue = isOverdueDueDate(task)
+    const isAboveGap = !preview && dragSession && options?.index !== undefined && options.dropIndex === options.index + 1
+    const isBelowGap = !preview && dragSession && options?.index !== undefined && options.dropIndex === options.index
+
+    const row = (
+      <div
+        className={`task-row ${isSelected ? 'selected' : ''} ${task.status === 'completed' ? 'done' : ''} ${
+          isReorderable ? 'reorderable' : ''
+        } ${isKeyboardSelected ? 'keyboard-selected' : ''} ${isMultiSelected ? 'multi-selected' : ''}`}
+        onClick={preview ? undefined : (event) => handleTaskRowClick(event, task)}
+      >
+        {!preview && selectionMode === 'active' && (
+          <input
+            type="checkbox"
+            checked={isMultiSelected}
+            onChange={() => toggleTaskSelection(task.id)}
+            onClick={(event) => event.stopPropagation()}
+          />
+        )}
+        {isReorderable && (
+          <span
+            className="task-drag-handle"
+            onPointerDown={
+              preview
+                ? undefined
+                : (event) => {
+                    event.stopPropagation()
+                    handleTaskDragStart(event, task)
+                  }
+            }
+          >
+            ::
+          </span>
+        )}
+        <button
+          className={`task-check ${task.status === 'completed' ? 'checked' : ''}`}
+          onClick={
+            preview
+              ? undefined
+              : (event) => {
+                  event.stopPropagation()
+                  void handleToggleTaskStatus(task)
+                }
+          }
+          tabIndex={preview ? -1 : undefined}
+        >
+          {task.status === 'completed' ? 'x' : ''}
+        </button>
+        <button
+          className="task-main"
+          onClick={
+            preview
+              ? undefined
+              : (event) => {
+                  if (task.status === 'completed') {
+                    handleTaskRowClick(event, task)
+                    return
+                  }
+                  event.preventDefault()
+                }
+          }
+        >
+          <span className="task-title">{task.title || 'Untitled task'}</span>
+          {preview && options?.dragShell && dragSession && dragSession.taskIds.length > 1 && (
+            <span className="task-inline-tag">+{dragSession.taskIds.length - 1} more</span>
+          )}
+          {task.tagIds.length > 0 && (
+            <span className="task-tag-row">
+              {task.tagIds.map((tag) => (
+                <span key={tag} className="task-inline-tag">
+                  {tag}
+                </span>
+              ))}
+            </span>
+          )}
+        </button>
+        <div className="task-side">
+          {task.priority > 0 && <span className={`priority-badge priority-${task.priority}`}>P{task.priority}</span>}
+          <span className={`task-date ${isOverdue ? 'overdue' : ''}`}>{displayDate(task.dueDate ?? task.startDate)}</span>
+          <span className="task-list-name" style={collectionColorStyle(collection?.color)}>
+            <span className="collection-color-dot subtle" />
+            {collection?.displayName}
+          </span>
+        </div>
+      </div>
+    )
+
+    if (preview) {
+      return row
+    }
+
+    return (
+      <div key={task.id}>
+        {dragSession && options?.dropIndex === options?.index && <div className="task-drop-slot" />}
+        <div
+          className={`task-row-shell ${isAboveGap ? 'gap-neighbor-above' : ''} ${isBelowGap ? 'gap-neighbor-below' : ''}`}
+          ref={(element) => {
+            if (element) {
+              taskRowsRef.current.set(task.id, element)
+            } else {
+              taskRowsRef.current.delete(task.id)
+            }
+          }}
+        >
+          {row}
+        </div>
+      </div>
+    )
+  }
+
   useEffect(() => {
-    if (visibleTasks.length === 0) {
+    setIsPlannedSectionCollapsed(true)
+  }, [activeViewKey])
+
+  useEffect(() => {
+    if (visibleRenderedTasks.length === 0) {
       setKeyboardSelectedTaskId(undefined)
       return
     }
 
     setKeyboardSelectedTaskId((current) =>
-      current && visibleTasks.some((task) => task.id === current) ? current : visibleTasks[0].id,
+      current && visibleRenderedTasks.some((task) => task.id === current) ? current : visibleRenderedTasks[0]?.id,
     )
-  }, [activeViewKey, deferredSearch, selectedViewTags, visibleTasks])
+  }, [activeViewKey, deferredSearch, selectedViewTags, visibleRenderedTasks])
 
   useEffect(() => {
-    setSelectedTaskIds((current) => current.filter((taskId) => visibleTasks.some((task) => task.id === taskId)))
-  }, [visibleTasks])
+    setSelectedTaskIds((current) => current.filter((taskId) => visibleRenderedTasks.some((task) => task.id === taskId)))
+  }, [visibleRenderedTasks])
 
   useEffect(() => {
     function handleGlobalKeyDown(event: KeyboardEvent) {
@@ -1069,19 +1232,19 @@ function App() {
         return
       }
 
-      if (isSettingsMode || isEditorMode || visibleTasks.length === 0) {
+      if (isSettingsMode || isEditorMode || visibleRenderedTasks.length === 0) {
         return
       }
 
       if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
         event.preventDefault()
-        const currentIndex = visibleTasks.findIndex((task) => task.id === keyboardSelectedTaskId)
+        const currentIndex = visibleRenderedTasks.findIndex((task) => task.id === keyboardSelectedTaskId)
         const baseIndex = currentIndex >= 0 ? currentIndex : 0
         const nextIndex =
           event.key === 'ArrowDown'
-            ? Math.min(baseIndex + 1, visibleTasks.length - 1)
+            ? Math.min(baseIndex + 1, visibleRenderedTasks.length - 1)
             : Math.max(baseIndex - 1, 0)
-        setKeyboardSelectedTaskId(visibleTasks[nextIndex]?.id)
+        setKeyboardSelectedTaskId(visibleRenderedTasks[nextIndex]?.id)
         return
       }
 
@@ -1093,7 +1256,7 @@ function App() {
 
       if (event.key === ' ' && keyboardSelectedTaskId) {
         event.preventDefault()
-        const task = visibleTasks.find((entry) => entry.id === keyboardSelectedTaskId)
+        const task = visibleRenderedTasks.find((entry) => entry.id === keyboardSelectedTaskId)
         if (task) {
           void actionRefs.current.toggleTaskStatus(task)
         }
@@ -1110,7 +1273,7 @@ function App() {
     isSettingsMode,
     keyboardSelectedTaskId,
     navigationItems,
-    visibleTasks,
+    visibleRenderedTasks,
   ])
 
   const collectionSections = useMemo(() => {
@@ -1306,8 +1469,8 @@ function App() {
 
   function selectTaskRange(taskId: string) {
     const anchorId = selectionAnchorTaskId ?? selectedTaskIds[0] ?? taskId
-    const startIndex = visibleTasks.findIndex((task) => task.id === anchorId)
-    const endIndex = visibleTasks.findIndex((task) => task.id === taskId)
+    const startIndex = visibleRenderedTasks.findIndex((task) => task.id === anchorId)
+    const endIndex = visibleRenderedTasks.findIndex((task) => task.id === taskId)
     if (startIndex < 0 || endIndex < 0) {
       setSelectedTaskIds([taskId])
       setSelectionAnchorTaskId(taskId)
@@ -1316,7 +1479,7 @@ function App() {
     }
 
     const [fromIndex, toIndex] = startIndex <= endIndex ? [startIndex, endIndex] : [endIndex, startIndex]
-    const rangeIds = visibleTasks.slice(fromIndex, toIndex + 1).map((task) => task.id)
+    const rangeIds = visibleRenderedTasks.slice(fromIndex, toIndex + 1).map((task) => task.id)
     setSelectedTaskIds(rangeIds)
     setSelectionAnchorTaskId(anchorId)
     setSelectionMode('active')
@@ -1473,7 +1636,12 @@ function App() {
   }
 
   function handleTaskDragStart(event: React.PointerEvent<HTMLSpanElement>, task: TaskItem) {
-    if (!canManualReorderTasks || task.status === 'completed' || activeView?.kind !== 'collection') {
+    if (
+      !canManualReorderTasks ||
+      task.status === 'completed' ||
+      activeView?.kind !== 'collection' ||
+      isPlannedTask(task)
+    ) {
       return
     }
 
@@ -2150,7 +2318,7 @@ function App() {
     }
 
     function updateDropIndex(pointerY: number) {
-      const openTaskIds = renderedOpenTasks.map((task) => task.id)
+      const openTaskIds = primaryOpenTasks.map((task) => task.id)
       if (openTaskIds.length === 0) {
         setDropIndex(0)
         return
@@ -2191,7 +2359,7 @@ function App() {
     }
 
     function finishDrag(commit: boolean) {
-      const currentDropIndex = dropIndex ?? renderedOpenTasks.length
+      const currentDropIndex = dropIndex ?? primaryOpenTasks.length
       const currentDragSession = dragSession
       setDragSession(undefined)
       setDropIndex(undefined)
@@ -2212,10 +2380,11 @@ function App() {
         currentDragSession.taskIds.length === 1
       ) {
         const collectionId = activeView.collectionId
-        const openTaskIds = visibleTasks.filter((task) => task.status !== 'completed').map((task) => task.id)
+        const unplannedTaskIds = primaryOpenTasks.map((task) => task.id)
+        const plannedTaskIds = plannedOpenTasks.map((task) => task.id)
         const baseOrder = [
-          ...(metadataDoc.manualTaskOrder[collectionId] ?? []).filter((id) => openTaskIds.includes(id)),
-          ...openTaskIds.filter((id) => !(metadataDoc.manualTaskOrder[collectionId] ?? []).includes(id)),
+          ...(metadataDoc.manualTaskOrder[collectionId] ?? []).filter((id) => unplannedTaskIds.includes(id)),
+          ...unplannedTaskIds.filter((id) => !(metadataDoc.manualTaskOrder[collectionId] ?? []).includes(id)),
         ]
         const nextOrder = moveTaskIdToIndex(baseOrder, currentDragSession.primaryTaskId, currentDropIndex)
         void saveMetadata(
@@ -2223,7 +2392,7 @@ function App() {
             ...metadataDoc,
             manualTaskOrder: {
               ...metadataDoc.manualTaskOrder,
-              [collectionId]: nextOrder,
+              [collectionId]: [...nextOrder, ...plannedTaskIds],
             },
             updatedAt: new Date().toISOString(),
           },
@@ -2254,7 +2423,7 @@ function App() {
       window.removeEventListener('keydown', handleKeyDown)
       document.body.classList.remove('drag-active')
     }
-  }, [activeView, canManualReorderTasks, dragSession, dropIndex, isManualOrderingEnabled, metadataDoc, renderedOpenTasks, saveMetadata, sidebarDropCollectionId, visibleTasks])
+  }, [activeView, canManualReorderTasks, dragSession, dropIndex, isManualOrderingEnabled, metadataDoc, plannedOpenTasks, primaryOpenTasks, saveMetadata, sidebarDropCollectionId])
 
   useEffect(() => {
     const activeSettingsDrag = settingsDragSession
@@ -2490,12 +2659,25 @@ function App() {
     setMessage(`Creating ${listDraft.name.trim()}...`)
 
     try {
-      const newCollection = await createTaskCollection(activeAccount, listDraft.name)
+      const parentCollection = listDraft.parentId
+        ? taskCollections.find((collection) => collection.id === listDraft.parentId)
+        : undefined
+      const createdCollection = await createTaskCollection(activeAccount, listDraft.name)
+      let newCollection = createdCollection
 
-      replaceSnapshot({
-        ...snapshot,
-        collections: [...snapshot.collections, newCollection],
-      })
+      if (parentCollection?.color) {
+        try {
+          newCollection = await updateTaskCollectionColor(activeAccount, createdCollection, parentCollection.color)
+        } catch (error) {
+          const failure = error instanceof Error ? error.message : 'Task list color update failed.'
+          recordSyncIssue('Task list color update', failure, activeAccount.id)
+        }
+      }
+
+      replaceSnapshotWith((current) => ({
+        ...current,
+        collections: [...current.collections, newCollection],
+      }))
 
       if (metadataDoc && listDraft.parentId) {
         await saveMetadata(
@@ -3571,7 +3753,7 @@ function App() {
           <section className="workspace-surface">
             <div className="list-header">
               <div>
-                <p>{visibleTasks.length} tasks</p>
+                <p>{visibleRenderedTasks.length} tasks</p>
               </div>
               <div className="row-control-group">
                 <button
@@ -3659,148 +3841,29 @@ function App() {
                 </div>
               )}
 
-              {renderedOpenTasks.map((task, index) => {
-                const isAboveGap = dragSession && dropIndex === index + 1
-                const isBelowGap = dragSession && dropIndex === index
+              {primaryOpenTasks.map((task, index) => renderTaskRow(task, { index, dropIndex }))}
 
-                return (
-                  <div key={task.id}>
-                    {dragSession && dropIndex === index && <div className="task-drop-slot" />}
-                    <div
-                      className={`task-row-shell ${isAboveGap ? 'gap-neighbor-above' : ''} ${
-                        isBelowGap ? 'gap-neighbor-below' : ''
-                      }`}
-                      ref={(element) => {
-                        if (element) {
-                          taskRowsRef.current.set(task.id, element)
-                        } else {
-                          taskRowsRef.current.delete(task.id)
-                        }
-                      }}
-                    >
-                      <div
-                        className={`task-row ${task.id === selectedTaskId ? 'selected' : ''} ${
-                          task.status === 'completed' ? 'done' : ''
-                        } ${canManualReorderTasks && task.status !== 'completed' ? 'reorderable' : ''} ${
-                          keyboardSelectedTaskId === task.id ? 'keyboard-selected' : ''
-                        } ${selectedTaskIds.includes(task.id) ? 'multi-selected' : ''
-                        }`}
-                        onClick={(event) => handleTaskRowClick(event, task)}
-                      >
-                        {selectionMode === 'active' && (
-                          <input
-                            type="checkbox"
-                            checked={selectedTaskIds.includes(task.id)}
-                            onChange={() => toggleTaskSelection(task.id)}
-                            onClick={(event) => event.stopPropagation()}
-                          />
-                        )}
-                        {canManualReorderTasks && task.status !== 'completed' && (
-                          <span
-                            className="task-drag-handle"
-                            onPointerDown={(event) => {
-                              event.stopPropagation()
-                              handleTaskDragStart(event, task)
-                            }}
-                          >
-                            ::
-                          </span>
-                        )}
-                        <button
-                          className={`task-check ${task.status === 'completed' ? 'checked' : ''}`}
-                          onClick={(event) => {
-                            event.stopPropagation()
-                            void handleToggleTaskStatus(task)
-                          }}
-                        >
-                          {task.status === 'completed' ? 'x' : ''}
-                        </button>
-                        <button className="task-main" onClick={(event) => event.preventDefault()}>
-                          <span className="task-title">{task.title || 'Untitled task'}</span>
-                          {task.tagIds.length > 0 && (
-                            <span className="task-tag-row">
-                              {task.tagIds.map((tag) => (
-                                <span key={tag} className="task-inline-tag">
-                                  {tag}
-                                </span>
-                              ))}
-                            </span>
-                          )}
-                        </button>
-                        <div className="task-side">
-                          {task.priority > 0 && <span className={`priority-badge priority-${task.priority}`}>P{task.priority}</span>}
-                          <span className="task-date">{displayDate(task.dueDate ?? task.startDate)}</span>
-                          <span className="task-list-name" style={collectionColorStyle(taskCollections.find((collection) => collection.id === task.collectionId)?.color)}>
-                            <span className="collection-color-dot subtle" />
-                            {taskCollections.find((collection) => collection.id === task.collectionId)?.displayName}
-                          </span>
-                        </div>
-                      </div>
+              {dragSession && dropIndex === primaryOpenTasks.length && <div className="task-drop-slot" />}
+
+              {plannedOpenTasks.length > 0 && (
+                <div className="task-subsection">
+                  <button
+                    className="task-subsection-toggle"
+                    onClick={() => setIsPlannedSectionCollapsed((current) => !current)}
+                  >
+                    <span>{isPlannedSectionCollapsed ? '▸' : '▾'}</span>
+                    <span>Planned</span>
+                    <span className="task-subsection-count">{plannedOpenTasks.length}</span>
+                  </button>
+                  {!isPlannedSectionCollapsed && (
+                    <div className="task-subsection-body">
+                      {plannedOpenTasks.map((task) => renderTaskRow(task))}
                     </div>
-                  </div>
-                )
-              })}
-
-              {dragSession && dropIndex === renderedOpenTasks.length && <div className="task-drop-slot" />}
-
-              {renderedCompletedTasks.map((task) => (
-                <div
-                  key={task.id}
-                  className="task-row-shell"
-                  ref={(element) => {
-                    if (element) {
-                      taskRowsRef.current.set(task.id, element)
-                    } else {
-                      taskRowsRef.current.delete(task.id)
-                    }
-                  }}
-                >
-                  <div className={`task-row ${task.id === selectedTaskId ? 'selected' : ''} done ${
-                    keyboardSelectedTaskId === task.id ? 'keyboard-selected' : ''
-                  } ${selectedTaskIds.includes(task.id) ? 'multi-selected' : ''}`}>
-                    {selectionMode === 'active' && (
-                      <input
-                        type="checkbox"
-                        checked={selectedTaskIds.includes(task.id)}
-                        onChange={() => toggleTaskSelection(task.id)}
-                        onClick={(event) => event.stopPropagation()}
-                      />
-                    )}
-                    <button
-                      className={`task-check ${task.status === 'completed' ? 'checked' : ''}`}
-                      onClick={(event) => {
-                        event.stopPropagation()
-                        void handleToggleTaskStatus(task)
-                      }}
-                    >
-                      {task.status === 'completed' ? 'x' : ''}
-                    </button>
-                    <button
-                      className="task-main"
-                      onClick={(event) => handleTaskRowClick(event, task)}
-                    >
-                      <span className="task-title">{task.title || 'Untitled task'}</span>
-                      {task.tagIds.length > 0 && (
-                        <span className="task-tag-row">
-                          {task.tagIds.map((tag) => (
-                            <span key={tag} className="task-inline-tag">
-                              {tag}
-                            </span>
-                          ))}
-                        </span>
-                      )}
-                    </button>
-                    <div className="task-side">
-                      {task.priority > 0 && <span className={`priority-badge priority-${task.priority}`}>P{task.priority}</span>}
-                      <span className="task-date">{displayDate(task.dueDate ?? task.startDate)}</span>
-                      <span className="task-list-name" style={collectionColorStyle(taskCollections.find((collection) => collection.id === task.collectionId)?.color)}>
-                        <span className="collection-color-dot subtle" />
-                        {taskCollections.find((collection) => collection.id === task.collectionId)?.displayName}
-                      </span>
-                    </div>
-                  </div>
+                  )}
                 </div>
-              ))}
+              )}
+
+              {renderedCompletedTasks.map((task) => renderTaskRow(task))}
             </div>
             {dragSession && draggedTask && (
               <div
@@ -3811,35 +3874,7 @@ function App() {
                   left: `${dragSession.pointerX - dragSession.offsetX}px`,
                 }}
               >
-                <div className="task-row reorderable">
-                  <span className="task-drag-handle">::</span>
-                  <button className={`task-check ${draggedTask.status === 'completed' ? 'checked' : ''}`} tabIndex={-1}>
-                    {draggedTask.status === 'completed' ? 'x' : ''}
-                  </button>
-                  <div className="task-main">
-                    <span className="task-title">{draggedTask.title || 'Untitled task'}</span>
-                    {dragSession.taskIds.length > 1 && (
-                      <span className="task-inline-tag">+{dragSession.taskIds.length - 1} more</span>
-                    )}
-                    {draggedTask.tagIds.length > 0 && (
-                      <span className="task-tag-row">
-                        {draggedTask.tagIds.map((tag) => (
-                          <span key={tag} className="task-inline-tag">
-                            {tag}
-                          </span>
-                        ))}
-                      </span>
-                    )}
-                  </div>
-                  <div className="task-side">
-                    {draggedTask.priority > 0 && <span className={`priority-badge priority-${draggedTask.priority}`}>P{draggedTask.priority}</span>}
-                    <span className="task-date">{displayDate(draggedTask.dueDate ?? draggedTask.startDate)}</span>
-                    <span className="task-list-name" style={collectionColorStyle(taskCollections.find((collection) => collection.id === draggedTask.collectionId)?.color)}>
-                      <span className="collection-color-dot subtle" />
-                      {taskCollections.find((collection) => collection.id === draggedTask.collectionId)?.displayName}
-                    </span>
-                  </div>
-                </div>
+                {renderTaskRow(draggedTask, { preview: true, dragShell: true })}
               </div>
             )}
           </section>
@@ -4303,7 +4338,7 @@ function App() {
               <div className="simple-row">
                 <div>
                   <strong>Supported syntax</strong>
-                  <span>Use `&`, `|`, `!`, parentheses, `#tag`, `p1`-`p4`, `status:open`, `today`, `overdue`, `next7`, `next14`, `next30`, `start:today`, `due:overdue`, `end:next14`, `list:"Name"`, and `subtree:"Name"`.</span>
+                  <span>Use `&`, `|`, `!`, parentheses, `#tag`, `p1`-`p4`, `status:open`, `today`, `overdue`, `next7`, `next14`, `next30`, `start:today`, `due:overdue`, `end:next14`, `completed:today`, `completed:last7`, `completed:last30`, `list:"Name"`, and `subtree:"Name"`.</span>
                 </div>
               </div>
               <div className="settings-form split">

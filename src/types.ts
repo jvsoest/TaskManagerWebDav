@@ -4,7 +4,7 @@ export type TaskStatus = 'needs-action' | 'in-process' | 'completed' | 'cancelle
 
 export type SyncState = 'idle' | 'syncing' | 'synced' | 'error'
 export type TaskOrderMode = 'manual' | 'property'
-export type TaskOrderField = 'dueDate' | 'startDate' | 'priority' | 'title' | 'createdAt' | 'updatedAt' | 'status'
+export type TaskOrderField = 'dueDate' | 'startDate' | 'completedAt' | 'priority' | 'title' | 'createdAt' | 'updatedAt' | 'status'
 export type SortDirection = 'asc' | 'desc'
 export type ConnectionMode = 'direct' | 'proxy'
 export type ReminderAnchor = 'start' | 'due'

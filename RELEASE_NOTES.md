@@ -1,5 +1,15 @@
 # Release Notes
 
+## 2026-03-29
+
+### Task list presentation
+- Overdue due dates in task rows now render in red.
+- Regular task-list views now move tasks with a start or due date into a collapsed `Planned` section.
+- Fixed iPhone task-row overflow by truncating long task titles and keeping date/list metadata inside the task card.
+- New sublists now inherit the color of their parent list when created.
+- Smart lists can now filter by completion date with `completed:today`, `completed:last7`, and `completed:last30`, and can sort by completion date.
+- Added system-driven dark mode support based on the OS/browser color-scheme preference.
+
 ## 2026-03-25
 
 ### Sync and offline reliability
