@@ -48,6 +48,7 @@
 - Fixed the Safari-sensitive clear-cache/reconnect flow by preserving reconnect settings, unregistering service workers during a full local reset, and reloading back into the account screen with proxy settings restored.
 - Fixed first-time reconnect after a cache reset so a successful account login now switches back into the task workspace instead of leaving the user stranded in settings.
 - Fixed a stale-state race during first sync after reconnecting so newly connected accounts are not overwritten out of local state on Safari-sensitive timings.
+- Hardened Safari/iOS reconnects further by making snapshot updates immediate and keeping a local fallback snapshot when IndexedDB is unavailable right after a cache reset.
 
 ### Verification
 - `npm run build`

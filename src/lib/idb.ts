@@ -2,10 +2,70 @@ import type { Account, AppSnapshot, SmartList, TaskItem, TaskMutation } from '..
 
 const DB_NAME = 'taskmanager-webdav'
 const DB_VERSION = 3
+const FALLBACK_STORAGE_KEY = 'taskmanager-webdav-fallback'
 
 const STORES = ['accounts', 'collections', 'tasks', 'smartLists', 'metadataDocs', 'syncLogs', 'settings', 'queuedMutations'] as const
 
 let openPromise: Promise<IDBDatabase> | undefined
+
+function canUseFallbackStorage(): boolean {
+  return typeof window !== 'undefined' && typeof window.localStorage !== 'undefined'
+}
+
+function normalizeSnapshot(snapshot: AppSnapshot): AppSnapshot {
+  return {
+    accounts: snapshot.accounts.map((account) => ({
+      ...account,
+      connectionMode: account.connectionMode ?? 'direct',
+      proxyUrl: account.proxyUrl ?? '',
+    })),
+    collections: snapshot.collections,
+    tasks: snapshot.tasks.map(normalizeTask),
+    smartLists: snapshot.smartLists.map(normalizeSmartList),
+    metadataDocs: snapshot.metadataDocs,
+    syncLogs: snapshot.syncLogs,
+    settings: snapshot.settings
+      ? {
+          autoSyncEnabled: snapshot.settings.autoSyncEnabled ?? true,
+          autoSyncIntervalMinutes: snapshot.settings.autoSyncIntervalMinutes ?? 15,
+        }
+      : {
+          autoSyncEnabled: true,
+          autoSyncIntervalMinutes: 15,
+        },
+    queuedMutations: snapshot.queuedMutations.map(normalizeQueuedMutation),
+  }
+}
+
+function loadFallbackSnapshot(): AppSnapshot | undefined {
+  if (!canUseFallbackStorage()) {
+    return undefined
+  }
+
+  const raw = window.localStorage.getItem(FALLBACK_STORAGE_KEY)
+  if (!raw) {
+    return undefined
+  }
+
+  try {
+    return normalizeSnapshot(JSON.parse(raw) as AppSnapshot)
+  } catch {
+    window.localStorage.removeItem(FALLBACK_STORAGE_KEY)
+    return undefined
+  }
+}
+
+function saveFallbackSnapshot(snapshot: AppSnapshot) {
+  if (!canUseFallbackStorage()) {
+    return
+  }
+
+  try {
+    window.localStorage.setItem(FALLBACK_STORAGE_KEY, JSON.stringify(snapshot))
+  } catch {
+    // Ignore localStorage failures and rely on IndexedDB when available.
+  }
+}
 
 function normalizeTask(task: TaskItem): TaskItem {
   return {
@@ -93,40 +153,65 @@ function wrapTransaction(transaction: IDBTransaction): Promise<void> {
 }
 
 export async function loadSnapshot(): Promise<AppSnapshot> {
-  const db = await openDb()
-  const [accounts, collections, tasks, smartLists, metadataDocs, syncLogs, settings, queuedMutations] = await Promise.all(
-    STORES.map((storeName) =>
-      wrapRequest(db.transaction(storeName, 'readonly').objectStore(storeName).getAll()),
-    ),
-  )
+  try {
+    const db = await openDb()
+    const [accounts, collections, tasks, smartLists, metadataDocs, syncLogs, settings, queuedMutations] = await Promise.all(
+      STORES.map((storeName) =>
+        wrapRequest(db.transaction(storeName, 'readonly').objectStore(storeName).getAll()),
+      ),
+    )
 
-  return {
-    accounts: (accounts as Account[]).map((account) => ({
-      ...account,
-      connectionMode: account.connectionMode ?? 'direct',
-      proxyUrl: account.proxyUrl ?? '',
-    })),
-    collections,
-    tasks: (tasks as TaskItem[]).map(normalizeTask),
-    smartLists: (smartLists as SmartList[]).map(normalizeSmartList),
-    metadataDocs,
-    syncLogs,
-    settings: (settings as Array<{ id: string; autoSyncEnabled?: boolean; autoSyncIntervalMinutes?: number }>)[0]
-      ? {
-          autoSyncEnabled: (settings as Array<{ id: string; autoSyncEnabled?: boolean; autoSyncIntervalMinutes?: number }>)[0]
-            .autoSyncEnabled ?? true,
-          autoSyncIntervalMinutes: (settings as Array<{ id: string; autoSyncEnabled?: boolean; autoSyncIntervalMinutes?: number }>)[0]
-            .autoSyncIntervalMinutes ?? 15,
-        }
-      : {
-          autoSyncEnabled: true,
-          autoSyncIntervalMinutes: 15,
-        },
-    queuedMutations: (queuedMutations as TaskMutation[]).map(normalizeQueuedMutation),
+    const snapshot = normalizeSnapshot({
+      accounts: accounts as Account[],
+      collections: collections as AppSnapshot['collections'],
+      tasks: tasks as TaskItem[],
+      smartLists: smartLists as SmartList[],
+      metadataDocs: metadataDocs as AppSnapshot['metadataDocs'],
+      syncLogs: syncLogs as AppSnapshot['syncLogs'],
+      settings: (settings as Array<{ id: string; autoSyncEnabled?: boolean; autoSyncIntervalMinutes?: number }>)[0]
+        ? {
+            autoSyncEnabled: (settings as Array<{ id: string; autoSyncEnabled?: boolean; autoSyncIntervalMinutes?: number }>)[0]
+              .autoSyncEnabled ?? true,
+            autoSyncIntervalMinutes: (settings as Array<{ id: string; autoSyncEnabled?: boolean; autoSyncIntervalMinutes?: number }>)[0]
+              .autoSyncIntervalMinutes ?? 15,
+          }
+        : {
+            autoSyncEnabled: true,
+            autoSyncIntervalMinutes: 15,
+          },
+      queuedMutations: queuedMutations as TaskMutation[],
+    })
+
+    const isEmpty =
+      snapshot.accounts.length === 0 &&
+      snapshot.collections.length === 0 &&
+      snapshot.tasks.length === 0 &&
+      snapshot.smartLists.length === 0 &&
+      snapshot.metadataDocs.length === 0 &&
+      snapshot.syncLogs.length === 0 &&
+      snapshot.queuedMutations.length === 0
+
+    return isEmpty ? loadFallbackSnapshot() ?? snapshot : snapshot
+  } catch {
+    return loadFallbackSnapshot() ?? {
+      accounts: [],
+      collections: [],
+      tasks: [],
+      smartLists: [],
+      metadataDocs: [],
+      syncLogs: [],
+      settings: {
+        autoSyncEnabled: true,
+        autoSyncIntervalMinutes: 15,
+      },
+      queuedMutations: [],
+    }
   }
 }
 
 export async function saveSnapshot(snapshot: AppSnapshot): Promise<void> {
+  saveFallbackSnapshot(snapshot)
+
   const db = await openDb()
   const transaction = db.transaction(STORES, 'readwrite')
   const accounts = transaction.objectStore('accounts')
@@ -160,6 +245,14 @@ export async function saveSnapshot(snapshot: AppSnapshot): Promise<void> {
 }
 
 export async function clearLocalCache(): Promise<void> {
+  if (canUseFallbackStorage()) {
+    try {
+      window.localStorage.removeItem(FALLBACK_STORAGE_KEY)
+    } catch {
+      // Ignore localStorage failures during cache clear.
+    }
+  }
+
   if (openPromise) {
     const db = await openPromise
     db.close()

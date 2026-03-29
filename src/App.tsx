@@ -1,4 +1,4 @@
-import { startTransition, useCallback, useDeferredValue, useEffect, useMemo, useRef, useState } from 'react'
+import { useCallback, useDeferredValue, useEffect, useMemo, useRef, useState } from 'react'
 import rehypeRaw from 'rehype-raw'
 import rehypeSanitize from 'rehype-sanitize'
 import ReactMarkdown from 'react-markdown'
@@ -556,7 +556,11 @@ function App() {
       return
     }
 
-    void saveSnapshot(snapshot)
+    void saveSnapshot(snapshot).catch((error) => {
+      const failure = error instanceof Error ? error.message : 'Failed to persist local data.'
+      console.error('Failed to persist local snapshot', error)
+      setMessage(failure)
+    })
   }, [hydrated, snapshot])
 
   useEffect(() => {
@@ -1150,11 +1154,16 @@ function App() {
         : orderedSmartLists[0]?.name ?? orderedTaskCollections[0]?.displayName ?? 'Tasks'
 
   function replaceSnapshot(nextSnapshot: AppSnapshot) {
-    startTransition(() => setSnapshot(nextSnapshot))
+    snapshotRef.current = nextSnapshot
+    setSnapshot(nextSnapshot)
   }
 
   function replaceSnapshotWith(updater: (current: AppSnapshot) => AppSnapshot) {
-    startTransition(() => setSnapshot((current) => updater(current)))
+    setSnapshot((current) => {
+      const nextSnapshot = updater(current)
+      snapshotRef.current = nextSnapshot
+      return nextSnapshot
+    })
   }
 
   function updateAccount(accountId: string, patch: Partial<Account>) {
