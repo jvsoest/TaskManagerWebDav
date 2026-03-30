@@ -1,4 +1,5 @@
 import type { Account, AppSnapshot, SmartList, TaskItem, TaskMutation } from '../types'
+import { normalizeManualTaskOrder, normalizeTaskIdentity } from './task-ids'
 
 const DB_NAME = 'taskmanager-webdav'
 const DB_VERSION = 3
@@ -22,7 +23,10 @@ function normalizeSnapshot(snapshot: AppSnapshot): AppSnapshot {
     collections: snapshot.collections,
     tasks: snapshot.tasks.map(normalizeTask),
     smartLists: snapshot.smartLists.map(normalizeSmartList),
-    metadataDocs: snapshot.metadataDocs,
+    metadataDocs: snapshot.metadataDocs.map((doc) => ({
+      ...doc,
+      manualTaskOrder: normalizeManualTaskOrder(doc.manualTaskOrder ?? {}),
+    })),
     syncLogs: snapshot.syncLogs,
     settings: snapshot.settings
       ? {
@@ -68,7 +72,7 @@ function saveFallbackSnapshot(snapshot: AppSnapshot) {
 }
 
 function normalizeTask(task: TaskItem): TaskItem {
-  return {
+  return normalizeTaskIdentity({
     ...task,
     reminders: Array.isArray(task.reminders) ? task.reminders : [],
     unsupportedReminderBlocks: Array.isArray(task.unsupportedReminderBlocks)
@@ -77,7 +81,7 @@ function normalizeTask(task: TaskItem): TaskItem {
     tagIds: Array.isArray(task.tagIds) ? task.tagIds : [],
     startDateIsAllDay: task.startDateIsAllDay ?? true,
     dueDateIsAllDay: task.dueDateIsAllDay ?? true,
-  }
+  })
 }
 
 function normalizeSmartList(smartList: SmartList): SmartList {

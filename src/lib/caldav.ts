@@ -10,6 +10,7 @@ import {
   serializeSmartListPayload,
 } from './filters'
 import { newUuid } from './ids'
+import { buildTaskId, normalizeManualTaskOrder } from './task-ids'
 import type {
   Account,
   AccountConnectionInput,
@@ -996,6 +997,7 @@ function parseTaskFromIcs(
   payload: string,
   accountId: string,
   collectionId: string,
+  useCollectionScopedId = true,
 ): TaskItem | undefined {
   const lines = unfoldIcs(payload)
   const props = new Map<string, string[]>()
@@ -1052,7 +1054,7 @@ function parseTaskFromIcs(
   }
 
   return {
-    id: uid,
+    id: useCollectionScopedId ? buildTaskId(collectionId, uid) : uid,
     uid,
     accountId,
     collectionId,
@@ -1332,7 +1334,7 @@ function normalizeMetadataDocument(
   const normalizedManualTaskOrder = Object.fromEntries(
     Object.entries(rawDoc.manualTaskOrder ?? {}).flatMap(([storedCollectionRef, taskIds]) => {
       const collectionId = collectionIdByRef.get(extractCollectionRef(storedCollectionRef))
-      return collectionId ? [[collectionId, taskIds ?? []]] : []
+      return collectionId ? [[collectionId, (taskIds ?? []) as string[]]] : []
     }),
   )
 
@@ -1344,7 +1346,7 @@ function normalizeMetadataDocument(
     smartListOrder: normalizedSmartListOrder,
     taskListOrderings: normalizedTaskListOrderings,
     taskListShowCompleted: normalizedTaskListShowCompleted,
-    manualTaskOrder: normalizedManualTaskOrder,
+    manualTaskOrder: normalizeManualTaskOrder(normalizedManualTaskOrder),
     updatedAt: typeof rawDoc.updatedAt === 'string' ? rawDoc.updatedAt : new Date().toISOString(),
     url,
     etag,
@@ -1490,7 +1492,7 @@ export async function syncAccount(account: Account): Promise<SyncResult> {
   let rawMetadataDoc: Record<string, unknown> = defaultMetadata as unknown as Record<string, unknown>
   if (metadataEntry?.payload) {
     try {
-      const parsedMetadataTask = parseTaskFromIcs(metadataEntry.payload, account.id, metadataCollection.id)
+      const parsedMetadataTask = parseTaskFromIcs(metadataEntry.payload, account.id, metadataCollection.id, false)
       rawMetadataDoc = {
         ...defaultMetadata,
         ...JSON.parse(parsedMetadataTask?.notes ?? '{}'),
@@ -1511,7 +1513,7 @@ export async function syncAccount(account: Account): Promise<SyncResult> {
     taskCollections.map(async (collection) => {
       const objects = await fetchCollectionObjectsForConnection(connection, collection, authorization)
       return objects.reduce<TaskItem[]>((entries, entry) => {
-        const task = parseTaskFromIcs(entry.payload ?? '', account.id, collection.id)
+        const task = parseTaskFromIcs(entry.payload ?? '', account.id, collection.id, true)
         if (task) {
           entries.push({
             ...task,
@@ -1527,7 +1529,7 @@ export async function syncAccount(account: Account): Promise<SyncResult> {
 
   const smartEntries = await fetchCollectionObjectsForConnection(connection, smartCollection, authorization)
   const smartLists = smartEntries.reduce<SmartList[]>((entries, entry) => {
-      const task = parseTaskFromIcs(entry.payload ?? '', account.id, smartCollection.id)
+      const task = parseTaskFromIcs(entry.payload ?? '', account.id, smartCollection.id, false)
       if (!task) {
         return entries
       }

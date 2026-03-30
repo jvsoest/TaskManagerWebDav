@@ -110,6 +110,20 @@ That script:
 - creates and deletes a temporary VTODO list
 - updates the app metadata with a temporary folder marker and then reverts it
 
+## Task ID Migration
+
+The app now uses collection-scoped task ids instead of plain CalDAV `UID`s. If your server has the same `UID` in multiple lists, run the one-off metadata migration script before using the updated app heavily:
+
+```bash
+set -a && source .env && set +a
+npm run migrate:task-ids
+```
+
+This updates the hidden TaskManager metadata document so `manualTaskOrder` entries are rewritten from legacy `UID` values to collection-scoped task ids.
+
+Practical note:
+- if you already have stale local browser data from the old id model, clear the app’s local cache once after running the migration so the browser snapshot is rebuilt cleanly
+
 ## GitHub Pages
 
 GitHub Pages deployment is configured in [`.github/workflows/deploy-pages.yml`](/home/jsoest/Repositories/TaskManagerWebDav/.github/workflows/deploy-pages.yml).

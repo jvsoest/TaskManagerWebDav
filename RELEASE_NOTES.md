@@ -1,5 +1,16 @@
 # Release Notes
 
+## 2026-03-30
+
+### Sync correctness
+- Fixed task identity so the app now scopes task ids by list/collection instead of treating CalDAV `UID` as globally unique.
+- This prevents tasks in one list, such as `Inbox`, from being overwritten in the app when another list contains the same `UID`.
+- Updated task save and move flows so cross-list moves delete the old remote copy instead of creating duplicate task records.
+
+### Migration
+- Added a one-off external migration script to rewrite legacy `manualTaskOrder` entries in the hidden TaskManager metadata collection to the new collection-scoped task-id format.
+- Documented the migration flow in the README, including a dry-run option before writing changes to the CalDAV server.
+
 ## 2026-03-29
 
 ### Task list presentation

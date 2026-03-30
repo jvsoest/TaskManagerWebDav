@@ -10,7 +10,8 @@
     "preview": "vite preview",
     "start": "node proxy/server.mjs",
     "proxy": "node proxy/server.mjs",
-    "proxy:test-auth": "node proxy/test-auth.mjs"
+    "proxy:test-auth": "node proxy/test-auth.mjs",
+    "migrate:task-ids": "node scripts/migrate-task-ids-to-collection-scope.mjs"
   },
   "dependencies": {
     "react": "^18.3.1",

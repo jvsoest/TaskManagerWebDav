@@ -36,6 +36,7 @@ import {
   upsertTaskRemote,
 } from './lib/caldav'
 import { newUuid } from './lib/ids'
+import { buildTaskId } from './lib/task-ids'
 import type {
   Account,
   AccountConnectionInput,
@@ -1509,25 +1510,32 @@ function App() {
 
     const now = new Date().toISOString()
     const movedTasks = tasksToMove.map((task) => ({
-      ...task,
-      collectionId: targetCollectionId,
-      updatedAt: now,
-      syncState: 'syncing' as const,
-      etag: undefined,
-      url: undefined,
+      previousTask: task,
+      nextTask: {
+        ...task,
+        id: buildTaskId(targetCollectionId, task.uid),
+        collectionId: targetCollectionId,
+        updatedAt: now,
+        syncState: 'syncing' as const,
+        etag: undefined,
+        url: undefined,
+      },
     }))
 
     replaceSnapshotWith((current) => ({
       ...current,
-      tasks: current.tasks.map((task) => movedTasks.find((entry) => entry.id === task.id) ?? task),
+      tasks: [
+        ...current.tasks.filter((task) => !tasksToMove.some((entry) => entry.id === task.id)),
+        ...movedTasks.map((entry) => entry.nextTask),
+      ],
     }))
 
     const nextMetadataDoc = movedTasks.reduce(
-      (currentDoc, task) =>
+      (currentDoc, entry) =>
         withTaskPosition(
           currentDoc,
-          task,
-          tasksToMove.find((entry) => entry.id === task.id),
+          entry.nextTask,
+          entry.previousTask,
         ),
       {
         ...metadataDoc,
@@ -1536,13 +1544,17 @@ function App() {
     )
 
     try {
-      for (const task of movedTasks) {
-        const remote = await upsertTaskRemote(activeAccount, targetCollection, task)
+      for (const entry of movedTasks) {
+        const remote = await upsertTaskRemote(activeAccount, targetCollection, entry.nextTask)
+        if (entry.previousTask.url) {
+          await deleteTaskRemote(activeAccount, entry.previousTask)
+        }
         replaceSnapshotWith((current) => ({
           ...current,
-          tasks: current.tasks.map((entry) =>
-            entry.id === task.id ? { ...task, url: remote.url, etag: remote.etag, syncState: 'synced' } : entry,
-          ),
+          tasks: [
+            ...current.tasks.filter((task) => task.id !== entry.nextTask.id && task.id !== entry.previousTask.id),
+            { ...entry.nextTask, url: remote.url, etag: remote.etag, syncState: 'synced' },
+          ],
         }))
       }
 
@@ -2053,9 +2065,12 @@ function App() {
     const targetCollection =
       taskCollections.find((collection) => collection.id === taskDraft.collectionId) ?? taskCollections[0]
     const now = new Date().toISOString()
+    const nextUid = taskDraft.uid ?? newId().replace(/-/g, '')
+    const nextTaskId = buildTaskId(targetCollection.id, nextUid)
+    const previousTaskId = previousTask?.id ?? taskDraft.id
     const nextTask: TaskItem = {
-      id: taskDraft.id ?? newId(),
-      uid: taskDraft.uid ?? newId().replace(/-/g, ''),
+      id: nextTaskId,
+      uid: nextUid,
       accountId: activeAccount.id,
       collectionId: targetCollection.id,
       title: taskDraft.title.trim(),
@@ -2069,12 +2084,12 @@ function App() {
       reminders: taskDraft.reminders ?? [],
       unsupportedReminderBlocks: taskDraft.unsupportedReminderBlocks ?? [],
       completedAt: taskDraft.status === 'completed' ? taskDraft.completedAt ?? now : undefined,
-      createdAt: snapshot.tasks.find((task) => task.id === taskDraft.id)?.createdAt ?? now,
+      createdAt: previousTask?.createdAt ?? now,
       updatedAt: now,
       tagIds: extractHashtags(taskDraft.title.trim(), taskDraft.notes.trim()),
       syncState: 'syncing',
-      url: taskDraft.url,
-      etag: taskDraft.etag,
+      url: previousTask?.collectionId === targetCollection.id ? taskDraft.url : undefined,
+      etag: previousTask?.collectionId === targetCollection.id ? taskDraft.etag : undefined,
     }
 
     setMessage(`Saving ${nextTask.title || 'task'}...`)
@@ -2082,9 +2097,15 @@ function App() {
     if (browserOffline()) {
       replaceSnapshotWith((current) => ({
         ...current,
-        tasks: [...current.tasks.filter((task) => task.id !== nextTask.id), { ...nextTask, syncState: 'error' }],
+        tasks: [
+          ...current.tasks.filter((task) => task.id !== nextTask.id && task.id !== previousTaskId),
+          { ...nextTask, syncState: 'error' },
+        ],
       }))
       queueTaskMutation('upsert', { ...nextTask, syncState: 'error' }, targetCollection.id)
+      if (previousTask && previousTask.collectionId !== targetCollection.id) {
+        queueTaskMutation('delete', previousTask, previousTask.collectionId)
+      }
       closeEditor()
       setMessage('Task saved locally. It will sync when you are back online.')
       return
@@ -2093,16 +2114,21 @@ function App() {
     try {
       replaceSnapshotWith((current) => ({
         ...current,
-        tasks: [...current.tasks.filter((task) => task.id !== nextTask.id), nextTask],
+        tasks: [...current.tasks.filter((task) => task.id !== nextTask.id && task.id !== previousTaskId), nextTask],
       }))
       const remote = await upsertTaskRemote(activeAccount, targetCollection, nextTask)
+      if (previousTask && previousTask.collectionId !== targetCollection.id) {
+        await deleteTaskRemote(activeAccount, previousTask)
+      }
       replaceSnapshotWith((current) => ({
         ...current,
         tasks: [
-          ...current.tasks.filter((task) => task.id !== nextTask.id),
+          ...current.tasks.filter((task) => task.id !== nextTask.id && task.id !== previousTaskId),
           { ...nextTask, url: remote.url, etag: remote.etag, syncState: 'synced' },
         ],
-        queuedMutations: current.queuedMutations.filter((entry) => entry.task.id !== nextTask.id),
+        queuedMutations: current.queuedMutations.filter(
+          (entry) => entry.task.id !== nextTask.id && entry.task.id !== previousTaskId,
+        ),
       }))
       const nextMetadataDoc = withTaskPosition(
         metadataDoc,
@@ -2128,12 +2154,15 @@ function App() {
       replaceSnapshotWith((current) => ({
         ...current,
         tasks: [
-          ...current.tasks.filter((task) => task.id !== nextTask.id),
+          ...current.tasks.filter((task) => task.id !== nextTask.id && task.id !== previousTaskId),
           queuedTask,
         ],
       }))
       if (isRetryableTaskMutationError(error)) {
         queueTaskMutation('upsert', queuedTask, targetCollection.id)
+        if (previousTask && previousTask.collectionId !== targetCollection.id) {
+          queueTaskMutation('delete', previousTask, previousTask.collectionId)
+        }
         closeEditor()
         setMessage('Task saved locally. It will sync when the connection is available again.')
         return
