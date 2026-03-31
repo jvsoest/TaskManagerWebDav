@@ -641,13 +641,34 @@ function App() {
     snapshotRef.current = snapshot
   }, [snapshot])
 
-  const activeAccount = snapshot.accounts.find((account) => account.id === activeAccountId)
-  const activeCollections = snapshot.collections.filter((collection) => collection.accountId === activeAccountId)
-  const taskCollections = activeCollections.filter((collection) => collection.kind === 'task')
-  const metadataCollection = activeCollections.find((collection) => collection.kind === 'metadata')
-  const smartCollection = activeCollections.find((collection) => collection.kind === 'smart')
-  const activeTasks = snapshot.tasks.filter((task) => task.accountId === activeAccountId)
-  const activeSmartLists = snapshot.smartLists.filter((smartList) => smartList.accountId === activeAccountId)
+  const activeAccount = useMemo(
+    () => snapshot.accounts.find((account) => account.id === activeAccountId),
+    [activeAccountId, snapshot.accounts],
+  )
+  const activeCollections = useMemo(
+    () => snapshot.collections.filter((collection) => collection.accountId === activeAccountId),
+    [activeAccountId, snapshot.collections],
+  )
+  const taskCollections = useMemo(
+    () => activeCollections.filter((collection) => collection.kind === 'task'),
+    [activeCollections],
+  )
+  const metadataCollection = useMemo(
+    () => activeCollections.find((collection) => collection.kind === 'metadata'),
+    [activeCollections],
+  )
+  const smartCollection = useMemo(
+    () => activeCollections.find((collection) => collection.kind === 'smart'),
+    [activeCollections],
+  )
+  const activeTasks = useMemo(
+    () => snapshot.tasks.filter((task) => task.accountId === activeAccountId),
+    [activeAccountId, snapshot.tasks],
+  )
+  const activeSmartLists = useMemo(
+    () => snapshot.smartLists.filter((smartList) => smartList.accountId === activeAccountId),
+    [activeAccountId, snapshot.smartLists],
+  )
   const metadataDoc =
     snapshot.metadataDocs.find((doc) => doc.accountId === activeAccountId) ??
     (activeAccountId ? createDefaultMetadata(activeAccountId) : undefined)
@@ -1345,7 +1366,12 @@ function App() {
   }, [activeViewKey, deferredSearch, selectedViewTags, visibleRenderedTasks])
 
   useEffect(() => {
-    setSelectedTaskIds((current) => current.filter((taskId) => visibleRenderedTasks.some((task) => task.id === taskId)))
+    setSelectedTaskIds((current) => {
+      const next = current.filter((taskId) => visibleRenderedTasks.some((task) => task.id === taskId))
+      return next.length === current.length && next.every((taskId, index) => taskId === current[index])
+        ? current
+        : next
+    })
   }, [visibleRenderedTasks])
 
   useEffect(() => {

@@ -16,6 +16,7 @@
 - Reduced background energy use by throttling connectivity probes instead of polling every minute while already online.
 - Replaced the fixed one-minute notification scan with a next-due scheduler so reminder checks only wake up when relevant.
 - Reduced sidebar CPU churn by precomputing list and smart-list counts instead of recalculating them inline on every render.
+- Fixed an idle render loop that could keep a CPU core busy at rest by repeatedly rewriting unchanged task-selection state.
 
 ## 2026-03-30
 
