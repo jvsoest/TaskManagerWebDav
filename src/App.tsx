@@ -20,7 +20,7 @@ import {
   validateSmartListDefinition,
 } from './lib/filters'
 import { clearLocalCache, loadSnapshot, saveSnapshot } from './lib/idb'
-import { notifyDueTasks } from './lib/notifications'
+import { getNextNotificationCheckDelay, notifyDueTasks } from './lib/notifications'
 import { unregisterServiceWorkers } from './lib/pwa'
 import {
   createTaskCollection,
@@ -149,6 +149,8 @@ const emptyConnection: AccountConnectionInput = {
 
 const CACHE_RESET_FORM_KEY = 'taskmanagerwebdav:cache-reset-form'
 const CACHE_RESET_MESSAGE_KEY = 'taskmanagerwebdav:cache-reset-message'
+const CONNECTIVITY_PROBE_MIN_INTERVAL_MS = 3 * 60_000
+const CONNECTIVITY_RECOVERY_INTERVAL_MS = 3 * 60_000
 
 const statuses: TaskStatus[] = ['needs-action', 'in-process', 'completed', 'cancelled']
 const orderingFields: Array<{ value: TaskOrderField; label: string }> = [
@@ -559,6 +561,8 @@ function App() {
   const autoSyncedAccountIdsRef = useRef<Set<string>>(new Set())
   const syncRunnerRef = useRef<(accountId?: string) => void>(() => {})
   const connectivityProbeRef = useRef<Promise<boolean> | undefined>()
+  const lastConnectivityProbeAtRef = useRef(0)
+  const lastConnectivityProbeAccountIdRef = useRef<string>()
   const moveTasksToCollectionRef = useRef<(taskIds: string[], targetCollectionId: string) => Promise<void>>(
     () => Promise.resolve(),
   )
@@ -760,7 +764,7 @@ function App() {
       : undefined
 
   const probeConnectivity = useCallback(
-    async (account = activeAccount, triggerSync = false): Promise<boolean> => {
+    async (account = activeAccount, triggerSync = false, force = false): Promise<boolean> => {
       if (!account) {
         setConnectivityState(browserOffline() ? 'offline' : 'online')
         return false
@@ -775,8 +779,20 @@ function App() {
         return connectivityProbeRef.current
       }
 
+      const now = Date.now()
+      if (
+        !force &&
+        connectivityState === 'online' &&
+        lastConnectivityProbeAccountIdRef.current === account.id &&
+        now - lastConnectivityProbeAtRef.current < CONNECTIVITY_PROBE_MIN_INTERVAL_MS
+      ) {
+        return true
+      }
+
       const probe = (async () => {
         setConnectivityState('checking')
+        lastConnectivityProbeAtRef.current = now
+        lastConnectivityProbeAccountIdRef.current = account.id
         const controller = new AbortController()
         const timeoutId = window.setTimeout(() => controller.abort(new Error('Connectivity probe timed out.')), 2_500)
 
@@ -816,7 +832,7 @@ function App() {
       connectivityProbeRef.current = probe
       return probe
     },
-    [activeAccount],
+    [activeAccount, connectivityState],
   )
 
   function handleDetectedOffline() {
@@ -906,7 +922,7 @@ function App() {
     }
 
     function handleOnline() {
-      void probeConnectivity(activeAccount, true)
+      void probeConnectivity(activeAccount, true, true)
     }
 
     function handleOffline() {
@@ -940,20 +956,20 @@ function App() {
       return
     }
 
-    void probeConnectivity(activeAccount)
+    void probeConnectivity(activeAccount, false, true)
   }, [activeAccount, hydrated, probeConnectivity])
 
   useEffect(() => {
-    if (!hydrated || !activeAccount) {
+    if (!hydrated || !activeAccount || connectivityState === 'online') {
       return
     }
 
     const intervalId = window.setInterval(() => {
-      void probeConnectivity(activeAccount)
-    }, 60_000)
+      void probeConnectivity(activeAccount, connectivityState === 'offline')
+    }, CONNECTIVITY_RECOVERY_INTERVAL_MS)
 
     return () => window.clearInterval(intervalId)
-  }, [activeAccount, hydrated, probeConnectivity])
+  }, [activeAccount, connectivityState, hydrated, probeConnectivity])
 
   useEffect(() => {
     const selectedTask = snapshot.tasks.find(
@@ -1026,12 +1042,31 @@ function App() {
   }, [quickSwitcherQuery])
 
   useEffect(() => {
-    const interval = window.setInterval(() => {
-      const tasks = snapshot.tasks.filter((task) => task.accountId === activeAccountId)
-      notifyDueTasks(tasks, deliveredRef.current)
-    }, 60_000)
+    let timeoutId: number | undefined
+    let cancelled = false
 
-    return () => window.clearInterval(interval)
+    const tasks = snapshot.tasks.filter((task) => task.accountId === activeAccountId)
+
+    function scheduleNextCheck() {
+      if (cancelled) {
+        return
+      }
+
+      const delay = getNextNotificationCheckDelay(tasks, deliveredRef.current)
+      timeoutId = window.setTimeout(() => {
+        notifyDueTasks(tasks, deliveredRef.current)
+        scheduleNextCheck()
+      }, delay)
+    }
+
+    scheduleNextCheck()
+
+    return () => {
+      cancelled = true
+      if (timeoutId !== undefined) {
+        window.clearTimeout(timeoutId)
+      }
+    }
   }, [activeAccountId, snapshot.tasks])
 
   const activeSmartList = useMemo(
@@ -1473,6 +1508,65 @@ function App() {
       children,
     }
   }, [collectionTreeNodes])
+  const collectionVisibleTaskCounts = useMemo(() => {
+    const self = new Map<string, number>()
+    const subtree = new Map<string, number>()
+    const showCompletedByCollection = metadataDoc?.taskListShowCompleted ?? {}
+
+    activeTasks.forEach((task) => {
+      if (showCompletedByCollection[task.collectionId] !== true && task.status === 'completed') {
+        return
+      }
+      self.set(task.collectionId, (self.get(task.collectionId) ?? 0) + 1)
+    })
+
+    function computeSubtreeCount(collectionId: string): number {
+      const directCount = self.get(collectionId) ?? 0
+      const childCount = (collectionSections.children.get(collectionId) ?? []).reduce(
+        (total, childCollection) => total + computeSubtreeCount(childCollection.id),
+        0,
+      )
+      const total = directCount + childCount
+      subtree.set(collectionId, total)
+      return total
+    }
+
+    collectionSections.roots.forEach((collection) => {
+      computeSubtreeCount(collection.id)
+    })
+
+    return {
+      self,
+      subtree,
+    }
+  }, [activeTasks, collectionSections, metadataDoc?.taskListShowCompleted])
+  const smartListCounts = useMemo(() => {
+    if (!metadataDoc) {
+      return new Map<string, number>()
+    }
+
+    return new Map(
+      orderedSmartLists.map((smartList) => {
+        const effectiveSmartList = smartList.showCompleted
+          ? smartList
+          : {
+              ...smartList,
+              definition: smartList.definition
+                ? `(${smartList.definition}) & !status:completed`
+                : '!status:completed',
+              filter: {
+                ...smartList.filter,
+                statuses: smartList.filter.statuses.filter((status: TaskStatus) => status !== 'completed'),
+              },
+            }
+
+        return [
+          smartList.id,
+          getSmartListCount(effectiveSmartList, activeTasks, metadataDoc, taskCollections),
+        ] as const
+      }),
+    )
+  }, [activeTasks, metadataDoc, orderedSmartLists, taskCollections])
   const orderedCollectionOptions = useMemo(() => {
     const options: Array<{ id: string; label: string }> = []
 
@@ -3228,38 +3322,14 @@ function App() {
             }}
           >
             <span>{smartList.name}</span>
-            <strong>
-              {metadataDoc
-                ? getSmartListCount(
-                    smartList.showCompleted
-                      ? smartList
-                      : {
-                          ...smartList,
-                          definition: smartList.definition
-                            ? `(${smartList.definition}) & !status:completed`
-                            : '!status:completed',
-                          filter: {
-                            ...smartList.filter,
-                            statuses: smartList.filter.statuses.filter((status: TaskStatus) => status !== 'completed'),
-                          },
-                        },
-                    activeTasks,
-                    metadataDoc,
-                    taskCollections,
-                  )
-                : 0}
-            </strong>
+            <strong>{smartListCounts.get(smartList.id) ?? 0}</strong>
           </button>
         </div>
       )
     }
 
     const collection = item.collection
-    const taskCount = activeTasks.filter(
-      (task) =>
-        task.collectionId === collection.id &&
-        (metadataDoc?.taskListShowCompleted[collection.id] === true || task.status !== 'completed'),
-    ).length
+    const taskCount = collectionVisibleTaskCounts.self.get(collection.id) ?? 0
 
     return (
       <div key={item.key} className="sidebar-folder">
@@ -3296,23 +3366,8 @@ function App() {
     const childCollections = collectionSections.children.get(collection.id) ?? []
     const hasChildren = childCollections.length > 0
     const isCollapsed = collapsedCollections.includes(collection.id)
-    const descendantIds = expandTreeIds(
-      [collection.id],
-      taskCollections.map((entry) => ({
-        id: entry.id,
-        parentId: metadataDoc?.collectionParents[entry.id],
-      })),
-    )
-    const selfTaskCount = activeTasks.filter(
-      (task) =>
-        task.collectionId === collection.id &&
-        (metadataDoc?.taskListShowCompleted[collection.id] === true || task.status !== 'completed'),
-    ).length
-    const descendantTaskCount = activeTasks.filter(
-      (task) =>
-        descendantIds.has(task.collectionId) &&
-        (metadataDoc?.taskListShowCompleted[task.collectionId] === true || task.status !== 'completed'),
-    ).length
+    const selfTaskCount = collectionVisibleTaskCounts.self.get(collection.id) ?? 0
+    const descendantTaskCount = collectionVisibleTaskCounts.subtree.get(collection.id) ?? selfTaskCount
     const taskCount = hasChildren && isCollapsed ? descendantTaskCount : selfTaskCount
 
     return (
@@ -3688,27 +3743,7 @@ function App() {
                   }}
                 >
                   <span>{smartList.name}</span>
-                  <strong>
-                    {metadataDoc
-                      ? getSmartListCount(
-                          smartList.showCompleted
-                            ? smartList
-                            : {
-                                ...smartList,
-                                definition: smartList.definition
-                                  ? `(${smartList.definition}) & !status:completed`
-                                  : '!status:completed',
-                                filter: {
-                                  ...smartList.filter,
-                                  statuses: smartList.filter.statuses.filter((status) => status !== 'completed'),
-                                },
-                              },
-                          activeTasks,
-                          metadataDoc,
-                          taskCollections,
-                        )
-                      : 0}
-                  </strong>
+                  <strong>{smartListCounts.get(smartList.id) ?? 0}</strong>
                 </button>
                 <button className="ghost-icon small" onClick={() => editSmartList(smartList)}>
                   ...

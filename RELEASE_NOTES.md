@@ -12,6 +12,11 @@
 - Favorites are now stored in the hidden TaskManager metadata collection and keep their own manual favorite order.
 - Added favorite toggles in settings for smart lists and regular lists, plus drag-based ordering inside the Favorites settings block.
 
+### Energy use
+- Reduced background energy use by throttling connectivity probes instead of polling every minute while already online.
+- Replaced the fixed one-minute notification scan with a next-due scheduler so reminder checks only wake up when relevant.
+- Reduced sidebar CPU churn by precomputing list and smart-list counts instead of recalculating them inline on every render.
+
 ## 2026-03-30
 
 ### Sync correctness
