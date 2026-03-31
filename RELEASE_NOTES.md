@@ -1,5 +1,17 @@
 # Release Notes
 
+## 2026-03-31
+
+### Offline handling
+- Added faster offline detection so retryable network failures and request timeouts move task saves, edits, and deletes into the local queue much sooner.
+- Added light connectivity checks on app open, focus, visibility return, reconnect, and a periodic interval so the app notices offline and online state changes faster.
+- Added request timeouts to CalDAV/proxy DAV requests to avoid long hangs before queueing local updates.
+
+### Sidebar favorites
+- Added a new `Favorites` section at the top of the sidebar for both smart lists and regular lists.
+- Favorites are now stored in the hidden TaskManager metadata collection and keep their own manual favorite order.
+- Added favorite toggles in settings for smart lists and regular lists, plus drag-based ordering inside the Favorites settings block.
+
 ## 2026-03-30
 
 ### Sync correctness

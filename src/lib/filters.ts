@@ -36,6 +36,8 @@ export function createDefaultMetadata(accountId: string): MetadataDocument {
     collectionParents: {},
     collectionOrder: [],
     smartListOrder: [],
+    favoriteItemIds: [],
+    favoriteOrder: [],
     taskListOrderings: {},
     taskListShowCompleted: {},
     manualTaskOrder: {},

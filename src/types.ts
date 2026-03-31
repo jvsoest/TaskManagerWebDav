@@ -70,6 +70,8 @@ export interface MetadataDocument {
   collectionParents: Record<string, string | undefined>
   collectionOrder: string[]
   smartListOrder: string[]
+  favoriteItemIds: string[]
+  favoriteOrder: string[]
   taskListOrderings: Record<string, TaskOrdering | undefined>
   taskListShowCompleted: Record<string, boolean | undefined>
   manualTaskOrder: Record<string, string[] | undefined>

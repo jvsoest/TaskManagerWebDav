@@ -49,6 +49,7 @@ import type {
   SyncLogEntry,
   TaskReminder,
   TaskMutation,
+  TaskCollection,
   TaskItem,
   TaskOrderField,
   TaskOrdering,
@@ -58,6 +59,13 @@ import type {
 type ActiveView =
   | { kind: 'collection'; collectionId: string }
   | { kind: 'smart'; smartListId: string }
+
+type ConnectivityState = 'online' | 'offline' | 'checking'
+type FavoriteKind = 'collection' | 'smart'
+type FavoriteItemKey = `${FavoriteKind}:${string}`
+type FavoriteSidebarItem =
+  | { key: FavoriteItemKey; kind: 'smart'; id: string; smartList: SmartList }
+  | { key: FavoriteItemKey; kind: 'collection'; id: string; collection: TaskCollection }
 
 type WorkspaceMode = 'tasks' | 'settings'
 type SettingsSection = 'accounts' | 'structure'
@@ -93,7 +101,7 @@ type PendingTaskPress = {
 }
 
 type SettingsDragSession = {
-  kind: 'collection' | 'smart'
+  kind: 'collection' | 'smart' | 'favorite'
   itemId: string
   parentId?: string
   pointerX: number
@@ -105,7 +113,7 @@ type SettingsDragSession = {
 }
 
 type PendingSettingsPress = {
-  kind: 'collection' | 'smart'
+  kind: 'collection' | 'smart' | 'favorite'
   itemId: string
   parentId?: string
   pointerX: number
@@ -222,6 +230,32 @@ function enqueueTaskMutation(
 
 function browserOffline(): boolean {
   return typeof navigator !== 'undefined' && navigator.onLine === false
+}
+
+function isTimeoutError(error: unknown): boolean {
+  return error instanceof Error && /timed out/i.test(error.message)
+}
+
+function favoriteItemKey(kind: FavoriteKind, id: string): FavoriteItemKey {
+  return `${kind}:${id}`
+}
+
+function parseFavoriteItemKey(value: string): { kind: FavoriteKind; id: string } | undefined {
+  if (value.startsWith('collection:')) {
+    return { kind: 'collection', id: value.slice('collection:'.length) }
+  }
+
+  if (value.startsWith('smart:')) {
+    return { kind: 'smart', id: value.slice('smart:'.length) }
+  }
+
+  return undefined
+}
+
+function sortPreferredIds(ids: string[], preferredIds: string[]): string[] {
+  const preferred = preferredIds.filter((id) => ids.includes(id))
+  const missing = ids.filter((id) => !preferred.includes(id))
+  return [...preferred, ...missing]
 }
 
 function isEditableTarget(target: EventTarget | null): boolean {
@@ -461,7 +495,7 @@ function buildTreeOptions<T extends { id: string; name: string; parentId?: strin
   return result
 }
 
-function settingsRowKey(kind: 'collection' | 'smart', itemId: string): string {
+function settingsRowKey(kind: 'collection' | 'smart' | 'favorite', itemId: string): string {
   return `${kind}:${itemId}`
 }
 
@@ -483,6 +517,9 @@ function App() {
   const [searchText, setSearchText] = useState('')
   const [selectedViewTags, setSelectedViewTags] = useState<string[]>([])
   const [selectionMode, setSelectionMode] = useState<SelectionMode>('inactive')
+  const [connectivityState, setConnectivityState] = useState<ConnectivityState>(
+    browserOffline() ? 'offline' : 'online',
+  )
   const [isPlannedSectionCollapsed, setIsPlannedSectionCollapsed] = useState(true)
   const [selectedTaskIds, setSelectedTaskIds] = useState<string[]>([])
   const [selectionAnchorTaskId, setSelectionAnchorTaskId] = useState<string>()
@@ -521,6 +558,7 @@ function App() {
   const syncInFlightRef = useRef<Set<string>>(new Set())
   const autoSyncedAccountIdsRef = useRef<Set<string>>(new Set())
   const syncRunnerRef = useRef<(accountId?: string) => void>(() => {})
+  const connectivityProbeRef = useRef<Promise<boolean> | undefined>()
   const moveTasksToCollectionRef = useRef<(taskIds: string[], targetCollectionId: string) => Promise<void>>(
     () => Promise.resolve(),
   )
@@ -621,9 +659,7 @@ function App() {
   )
   const orderedCollectionIds = useMemo(() => {
     const ids = taskCollections.map((collection) => collection.id)
-    const preferred = (metadataDoc?.collectionOrder ?? []).filter((id) => ids.includes(id))
-    const missing = ids.filter((id) => !preferred.includes(id))
-    return [...preferred, ...missing]
+    return sortPreferredIds(ids, metadataDoc?.collectionOrder ?? [])
   }, [metadataDoc?.collectionOrder, taskCollections])
   const orderedTaskCollections = useMemo(
     () =>
@@ -634,9 +670,7 @@ function App() {
   )
   const orderedSmartListIds = useMemo(() => {
     const ids = activeSmartLists.map((smartList) => smartList.id)
-    const preferred = (metadataDoc?.smartListOrder ?? []).filter((id) => ids.includes(id))
-    const missing = ids.filter((id) => !preferred.includes(id))
-    return [...preferred, ...missing]
+    return sortPreferredIds(ids, metadataDoc?.smartListOrder ?? [])
   }, [activeSmartLists, metadataDoc?.smartListOrder])
   const orderedSmartLists = useMemo(
     () =>
@@ -652,6 +686,45 @@ function App() {
 
     return orderedSmartLists.filter((smartList) => smartList.id !== settingsDragSession.itemId)
   }, [orderedSmartLists, settingsDragSession])
+  const favoriteItems = useMemo<FavoriteSidebarItem[]>(() => {
+    const validFavoriteKeys = (metadataDoc?.favoriteItemIds ?? []).filter((value) => {
+      const parsed = parseFavoriteItemKey(value)
+      if (!parsed) {
+        return false
+      }
+      return parsed.kind === 'smart'
+        ? orderedSmartLists.some((smartList) => smartList.id === parsed.id)
+        : orderedTaskCollections.some((collection) => collection.id === parsed.id)
+    })
+
+    return sortPreferredIds(validFavoriteKeys, metadataDoc?.favoriteOrder ?? [])
+      .map((value) => {
+        const parsed = parseFavoriteItemKey(value)
+        if (!parsed) {
+          return undefined
+        }
+
+        if (parsed.kind === 'smart') {
+          const smartList = orderedSmartLists.find((entry) => entry.id === parsed.id)
+          return smartList ? { key: value, ...parsed, smartList } : undefined
+        }
+
+        const collection = orderedTaskCollections.find((entry) => entry.id === parsed.id)
+        return collection ? { key: value, ...parsed, collection } : undefined
+      })
+      .filter((item): item is FavoriteSidebarItem => Boolean(item))
+  }, [metadataDoc?.favoriteItemIds, metadataDoc?.favoriteOrder, orderedSmartLists, orderedTaskCollections])
+  const renderedFavoriteItems = useMemo(() => {
+    if (settingsDragSession?.kind !== 'favorite') {
+      return favoriteItems
+    }
+
+    return favoriteItems.filter((item) => item.key !== settingsDragSession.itemId)
+  }, [favoriteItems, settingsDragSession])
+  const favoriteItemIdSet = useMemo(
+    () => new Set(metadataDoc?.favoriteItemIds ?? []),
+    [metadataDoc?.favoriteItemIds],
+  )
   const navigationItems = useMemo(
     () => [
       ...orderedSmartLists.map((smartList) => ({
@@ -685,6 +758,70 @@ function App() {
     : activeView?.kind === 'smart'
       ? `smart:${activeView.smartListId}`
       : undefined
+
+  const probeConnectivity = useCallback(
+    async (account = activeAccount, triggerSync = false): Promise<boolean> => {
+      if (!account) {
+        setConnectivityState(browserOffline() ? 'offline' : 'online')
+        return false
+      }
+
+      if (browserOffline()) {
+        setConnectivityState('offline')
+        return false
+      }
+
+      if (connectivityProbeRef.current) {
+        return connectivityProbeRef.current
+      }
+
+      const probe = (async () => {
+        setConnectivityState('checking')
+        const controller = new AbortController()
+        const timeoutId = window.setTimeout(() => controller.abort(new Error('Connectivity probe timed out.')), 2_500)
+
+        try {
+          if (account.connectionMode === 'proxy' && (account.proxyUrl ?? '').trim()) {
+            await fetch(account.proxyUrl ?? '', {
+              method: 'POST',
+              headers: {
+                'Content-Type': 'application/json',
+              },
+              body: '{}',
+              signal: controller.signal,
+            })
+          } else {
+            await fetch(account.serverUrl, {
+              method: 'GET',
+              mode: 'no-cors',
+              cache: 'no-store',
+              signal: controller.signal,
+            })
+          }
+
+          setConnectivityState('online')
+          if (triggerSync) {
+            syncRunnerRef.current(account.id)
+          }
+          return true
+        } catch {
+          setConnectivityState('offline')
+          return false
+        } finally {
+          window.clearTimeout(timeoutId)
+          connectivityProbeRef.current = undefined
+        }
+      })()
+
+      connectivityProbeRef.current = probe
+      return probe
+    },
+    [activeAccount],
+  )
+
+  function handleDetectedOffline() {
+    setConnectivityState('offline')
+  }
   const collectionTreeNodes = useMemo(
     () =>
       orderedTaskCollections.map((collection) => ({
@@ -769,12 +906,54 @@ function App() {
     }
 
     function handleOnline() {
-      syncRunnerRef.current(activeAccountId)
+      void probeConnectivity(activeAccount, true)
+    }
+
+    function handleOffline() {
+      setConnectivityState('offline')
+    }
+
+    function handleVisibilityChange() {
+      if (document.visibilityState === 'visible') {
+        void probeConnectivity(activeAccount)
+      }
+    }
+
+    function handleFocus() {
+      void probeConnectivity(activeAccount)
     }
 
     window.addEventListener('online', handleOnline)
-    return () => window.removeEventListener('online', handleOnline)
-  }, [activeAccountId, hydrated])
+    window.addEventListener('offline', handleOffline)
+    window.addEventListener('focus', handleFocus)
+    document.addEventListener('visibilitychange', handleVisibilityChange)
+    return () => {
+      window.removeEventListener('online', handleOnline)
+      window.removeEventListener('offline', handleOffline)
+      window.removeEventListener('focus', handleFocus)
+      document.removeEventListener('visibilitychange', handleVisibilityChange)
+    }
+  }, [activeAccount, activeAccountId, hydrated, probeConnectivity])
+
+  useEffect(() => {
+    if (!hydrated || !activeAccount) {
+      return
+    }
+
+    void probeConnectivity(activeAccount)
+  }, [activeAccount, hydrated, probeConnectivity])
+
+  useEffect(() => {
+    if (!hydrated || !activeAccount) {
+      return
+    }
+
+    const intervalId = window.setInterval(() => {
+      void probeConnectivity(activeAccount)
+    }, 60_000)
+
+    return () => window.clearInterval(intervalId)
+  }, [activeAccount, hydrated, probeConnectivity])
 
   useEffect(() => {
     const selectedTask = snapshot.tasks.find(
@@ -1414,6 +1593,8 @@ function App() {
             ...current,
             queuedMutations: current.queuedMutations.filter((entry) => entry.id !== mutation.id),
           }))
+        } else {
+          handleDetectedOffline()
         }
         throw error
       }
@@ -1678,7 +1859,7 @@ function App() {
 
   function handleSettingsDragStart(
     event: React.PointerEvent<HTMLSpanElement>,
-    kind: 'collection' | 'smart',
+    kind: 'collection' | 'smart' | 'favorite',
     itemId: string,
     parentId?: string,
   ) {
@@ -1916,6 +2097,30 @@ function App() {
     )
   }
 
+  async function handleToggleFavorite(kind: FavoriteKind, itemId: string, isFavorite: boolean) {
+    if (!metadataDoc) {
+      return
+    }
+
+    const key = favoriteItemKey(kind, itemId)
+    const nextFavoriteItemIds = isFavorite
+      ? metadataDoc.favoriteItemIds.filter((entry) => entry !== key)
+      : [...metadataDoc.favoriteItemIds, key]
+    const nextFavoriteOrder = isFavorite
+      ? metadataDoc.favoriteOrder.filter((entry) => entry !== key)
+      : [...metadataDoc.favoriteOrder.filter((entry) => entry !== key), key]
+
+    await saveMetadata(
+      {
+        ...metadataDoc,
+        favoriteItemIds: nextFavoriteItemIds,
+        favoriteOrder: nextFavoriteOrder,
+        updatedAt: new Date().toISOString(),
+      },
+      isFavorite ? 'Removed from favorites.' : 'Added to favorites.',
+    )
+  }
+
   async function handleConnectAccount() {
     if (!connectionForm.serverUrl || !connectionForm.username || !connectionForm.password) {
       setMessage('Server URL, username, and password are required.')
@@ -1992,6 +2197,7 @@ function App() {
       try {
         await flushQueuedMutations(account)
       } catch (error) {
+        handleDetectedOffline()
         const failure = error instanceof Error ? error.message : 'Queued task replay failed.'
         recordSyncIssue('Queued task replay', failure, account.id)
       }
@@ -2033,6 +2239,9 @@ function App() {
       }
       setMessage(isFirstSync ? 'Account connected and synced.' : `${account.label} is up to date.`)
     } catch (error) {
+      if (isRetryableTaskMutationError(error) || isTimeoutError(error)) {
+        handleDetectedOffline()
+      }
       const failure = error instanceof Error ? error.message : 'Sync failed.'
       updateAccount(account.id, { syncState: 'error', lastError: failure })
       recordSyncIssue('Account sync', failure, account.id)
@@ -2094,7 +2303,7 @@ function App() {
 
     setMessage(`Saving ${nextTask.title || 'task'}...`)
 
-    if (browserOffline()) {
+    if (connectivityState === 'offline' || browserOffline()) {
       replaceSnapshotWith((current) => ({
         ...current,
         tasks: [
@@ -2159,6 +2368,7 @@ function App() {
         ],
       }))
       if (isRetryableTaskMutationError(error)) {
+        handleDetectedOffline()
         queueTaskMutation('upsert', queuedTask, targetCollection.id)
         if (previousTask && previousTask.collectionId !== targetCollection.id) {
           queueTaskMutation('delete', previousTask, previousTask.collectionId)
@@ -2196,7 +2406,7 @@ function App() {
       tasks: [...snapshot.tasks.filter((entry) => entry.id !== task.id), updatedTask],
     })
 
-    if (browserOffline()) {
+    if (connectivityState === 'offline' || browserOffline()) {
       const queuedTask = { ...updatedTask, syncState: 'error' as const }
       replaceSnapshotWith((current) => ({
         ...current,
@@ -2234,6 +2444,7 @@ function App() {
         tasks: [...current.tasks.filter((entry) => entry.id !== task.id), queuedTask],
       }))
       if (isRetryableTaskMutationError(error)) {
+        handleDetectedOffline()
         queueTaskMutation('upsert', queuedTask, targetCollection.id)
         setMessage('Task update saved locally. It will sync when the connection is available again.')
         return
@@ -2260,7 +2471,7 @@ function App() {
     })
     closeEditor()
 
-    if (browserOffline()) {
+    if (connectivityState === 'offline' || browserOffline()) {
       queueTaskMutation('delete', existing, existing.collectionId)
       setMessage('Task deletion saved locally. It will sync when you are back online.')
       return
@@ -2293,6 +2504,7 @@ function App() {
       setMessage('Task deleted from CalDAV.')
     } catch (error) {
       if (isRetryableTaskMutationError(error)) {
+        handleDetectedOffline()
         queueTaskMutation('delete', existing, existing.collectionId)
         setMessage('Task deletion saved locally. It will sync when the connection is available again.')
         return
@@ -2334,6 +2546,9 @@ function App() {
         }))
         setMessage(successMessage)
       } catch (error) {
+        if (isRetryableTaskMutationError(error) || isTimeoutError(error)) {
+          handleDetectedOffline()
+        }
         const failure = error instanceof Error ? error.message : 'Metadata save failed.'
         recordSyncIssue('Metadata sync', failure, activeAccount.id)
         setMessage(failure)
@@ -2471,6 +2686,10 @@ function App() {
         return renderedSmartLists.map((smartList) => smartList.id)
       }
 
+      if (session.kind === 'favorite') {
+        return renderedFavoriteItems.map((item) => item.key)
+      }
+
       return orderedCollectionIds.filter(
         (collectionId) =>
           metadata.collectionParents[collectionId] === session.parentId && collectionId !== session.itemId,
@@ -2535,6 +2754,18 @@ function App() {
         return
       }
 
+      if (session.kind === 'favorite') {
+        void saveMetadata(
+          {
+            ...metadata,
+            favoriteOrder: moveIdToIndex(renderedFavoriteItems.map((item) => item.key), session.itemId, currentDropIndex),
+            updatedAt: new Date().toISOString(),
+          },
+          'Favorites order updated.',
+        )
+        return
+      }
+
       void saveMetadata(
         {
           ...metadata,
@@ -2572,7 +2803,7 @@ function App() {
       window.removeEventListener('keydown', handleKeyDown)
       document.body.classList.remove('drag-active')
     }
-  }, [metadataDoc, orderedCollectionIds, orderedSmartListIds, renderedSmartLists, saveMetadata, settingsDragSession, settingsDropIndex])
+  }, [metadataDoc, orderedCollectionIds, orderedSmartListIds, renderedFavoriteItems, renderedSmartLists, saveMetadata, settingsDragSession, settingsDropIndex])
 
   async function handleAssignCollectionParent(collectionId: string, parentId?: string) {
     if (!metadataDoc) {
@@ -2635,6 +2866,8 @@ function App() {
               }),
             ),
             collectionOrder: metadataDoc.collectionOrder.filter((id) => id !== collectionId),
+            favoriteItemIds: metadataDoc.favoriteItemIds.filter((id) => id !== favoriteItemKey('collection', collectionId)),
+            favoriteOrder: metadataDoc.favoriteOrder.filter((id) => id !== favoriteItemKey('collection', collectionId)),
             taskListOrderings: Object.fromEntries(
               Object.entries(metadataDoc.taskListOrderings).filter(([key]) => key !== collectionId),
             ),
@@ -2874,11 +3107,17 @@ function App() {
 
     try {
       await deleteSmartListRemote(activeAccount, smartList)
-      if (metadataDoc && metadataDoc.smartListOrder.includes(smartList.id)) {
+      if (
+        metadataDoc &&
+        (metadataDoc.smartListOrder.includes(smartList.id) ||
+          metadataDoc.favoriteItemIds.includes(favoriteItemKey('smart', smartList.id)))
+      ) {
         await saveMetadata(
           {
             ...metadataDoc,
             smartListOrder: metadataDoc.smartListOrder.filter((id) => id !== smartList.id),
+            favoriteItemIds: metadataDoc.favoriteItemIds.filter((id) => id !== favoriteItemKey('smart', smartList.id)),
+            favoriteOrder: metadataDoc.favoriteOrder.filter((id) => id !== favoriteItemKey('smart', smartList.id)),
             updatedAt: new Date().toISOString(),
           },
           'Smart list deleted.',
@@ -2973,6 +3212,79 @@ function App() {
     setSmartDraftOrdering(normalizeOrdering(smartList.ordering, defaultSmartListOrdering()))
     setSmartDraftShowCompleted(smartList.showCompleted)
     setIsSmartEditorOpen(true)
+  }
+
+  function renderFavoriteSidebarRow(item: FavoriteSidebarItem) {
+    if (item.kind === 'smart') {
+      const smartList = item.smartList
+      return (
+        <div key={item.key} className="sidebar-smart-row">
+          <button
+            className={`sidebar-link ${activeView?.kind === 'smart' && activeView.smartListId === smartList.id ? 'active' : ''}`}
+            onClick={() => {
+              setWorkspaceMode('tasks')
+              setActiveView({ kind: 'smart', smartListId: smartList.id })
+              setIsSidebarOpen(false)
+            }}
+          >
+            <span>{smartList.name}</span>
+            <strong>
+              {metadataDoc
+                ? getSmartListCount(
+                    smartList.showCompleted
+                      ? smartList
+                      : {
+                          ...smartList,
+                          definition: smartList.definition
+                            ? `(${smartList.definition}) & !status:completed`
+                            : '!status:completed',
+                          filter: {
+                            ...smartList.filter,
+                            statuses: smartList.filter.statuses.filter((status: TaskStatus) => status !== 'completed'),
+                          },
+                        },
+                    activeTasks,
+                    metadataDoc,
+                    taskCollections,
+                  )
+                : 0}
+            </strong>
+          </button>
+        </div>
+      )
+    }
+
+    const collection = item.collection
+    const taskCount = activeTasks.filter(
+      (task) =>
+        task.collectionId === collection.id &&
+        (metadataDoc?.taskListShowCompleted[collection.id] === true || task.status !== 'completed'),
+    ).length
+
+    return (
+      <div key={item.key} className="sidebar-folder">
+        <div className="sidebar-folder-toggle depth-0 has-children">
+          <button
+            className={`sidebar-link ${
+              activeView?.kind === 'collection' && activeView.collectionId === collection.id ? 'active' : ''
+            }`}
+            style={collectionColorStyle(collection.color)}
+            onClick={() => {
+              setWorkspaceMode('tasks')
+              setActiveView({ kind: 'collection', collectionId: collection.id })
+              setCollectionViewScope('self')
+              setIsSidebarOpen(false)
+            }}
+          >
+            <span className="sidebar-link-main">
+              <span className="collection-color-dot" />
+              <span>{collection.displayName}</span>
+            </span>
+            <strong>{taskCount}</strong>
+          </button>
+        </div>
+      </div>
+    )
   }
 
   function renderCollectionTree(collectionId: string, depth = 0): React.JSX.Element | null {
@@ -3164,6 +3476,18 @@ function App() {
               />
               Show completed
             </label>
+            <button
+              className={`ghost-button ${favoriteItemIdSet.has(favoriteItemKey('collection', collection.id)) ? 'active' : ''}`}
+              onClick={() =>
+                void handleToggleFavorite(
+                  'collection',
+                  collection.id,
+                  favoriteItemIdSet.has(favoriteItemKey('collection', collection.id)),
+                )
+              }
+            >
+              {favoriteItemIdSet.has(favoriteItemKey('collection', collection.id)) ? 'Unfavorite' : 'Favorite'}
+            </button>
             {ordering.mode === 'property' && (
               <>
                 <select
@@ -3259,6 +3583,45 @@ function App() {
     )
   }
 
+  function renderSettingsFavoriteRow(item: FavoriteSidebarItem, index: number) {
+    const itemLabel = item.kind === 'smart' ? item.smartList.name : item.collection.displayName
+    return (
+      <div key={item.key}>
+        {settingsDragSession?.kind === 'favorite' && settingsDropIndex === index && (
+          <div className="task-drop-slot settings-drop-slot" />
+        )}
+        <div
+          ref={(element) => {
+            const key = settingsRowKey('favorite', item.key)
+            if (element) {
+              settingsRowsRef.current.set(key, element)
+            } else {
+              settingsRowsRef.current.delete(key)
+            }
+          }}
+          className={`simple-row ${settingsDragSession?.kind === 'favorite' && settingsDragSession.itemId === item.key ? 'drag-source-hidden' : ''}`}
+        >
+          <div className="settings-row-title" style={item.kind === 'collection' ? collectionColorStyle(item.collection.color) : undefined}>
+            <span
+              className="task-drag-handle settings-drag-handle"
+              onPointerDown={(event) => handleSettingsDragStart(event, 'favorite', item.key)}
+            >
+              ::
+            </span>
+            {item.kind === 'collection' ? <span className="collection-color-dot" /> : null}
+            <strong>{itemLabel}</strong>
+            <span className="inline-definition">{item.kind === 'smart' ? 'Smart list' : 'List'}</span>
+          </div>
+          <div className="row-control-group">
+            <button className="ghost-button" onClick={() => void handleToggleFavorite(item.kind, item.kind === 'smart' ? item.smartList.id : item.collection.id, true)}>
+              Remove
+            </button>
+          </div>
+        </div>
+      </div>
+    )
+  }
+
   actionRefs.current.beginNewTask = beginNewTask
   actionRefs.current.saveTask = handleSaveTask
   actionRefs.current.toggleTaskStatus = handleToggleTaskStatus
@@ -3286,6 +3649,15 @@ function App() {
         </div>
 
         <nav className="sidebar-nav">
+          {favoriteItems.length > 0 && (
+            <div className="sidebar-group">
+              <div className="sidebar-group-title">
+                <span>Favorites</span>
+              </div>
+              {favoriteItems.map((item) => renderFavoriteSidebarRow(item))}
+            </div>
+          )}
+
           <div className="sidebar-group">
             <div className="sidebar-group-title">
               <span>Smart lists</span>
@@ -3375,9 +3747,17 @@ function App() {
           <button className="account-switcher" onClick={() => openSettings('accounts')}>
             <div>
               <strong>{activeAccount?.label ?? 'No account'}</strong>
-              <span>{activeAccount ? syncLabel(activeAccount.lastSyncAt) : 'Connect a CalDAV account'}</span>
+              <span>
+                {activeAccount
+                  ? connectivityState === 'offline'
+                    ? 'Offline'
+                    : connectivityState === 'checking'
+                      ? 'Checking connection...'
+                      : syncLabel(activeAccount.lastSyncAt)
+                  : 'Connect a CalDAV account'}
+              </span>
             </div>
-            <span>{activeAccount?.syncState ?? 'idle'}</span>
+            <span>{connectivityState === 'offline' ? 'offline' : activeAccount?.syncState ?? 'idle'}</span>
           </button>
         </div>
       </aside>
@@ -3659,6 +4039,27 @@ function App() {
 
                     <div className="settings-block">
                       <div className="section-title-row">
+                        <h4>Favorites</h4>
+                      </div>
+                      <div className="stack-list">
+                        {renderedFavoriteItems.map((item, index) => renderSettingsFavoriteRow(item, index))}
+                        {settingsDragSession?.kind === 'favorite' && settingsDropIndex === renderedFavoriteItems.length && (
+                          <div className="task-drop-slot settings-drop-slot" />
+                        )}
+
+                        {favoriteItems.length === 0 && (
+                          <div className="simple-row">
+                            <div>
+                              <strong>No favorites yet.</strong>
+                              <span>Mark a smart list or a list as favorite to pin it to the top of the sidebar.</span>
+                            </div>
+                          </div>
+                        )}
+                      </div>
+                    </div>
+
+                    <div className="settings-block">
+                      <div className="section-title-row">
                         <h4>Smart lists</h4>
                         <button
                           className="ghost-button"
@@ -3702,6 +4103,18 @@ function App() {
                                 <span className="inline-definition">{smartList.definition || 'No definition'}</span>
                               </div>
                               <div className="row-control-group">
+                                <button
+                                  className={`ghost-button ${favoriteItemIdSet.has(favoriteItemKey('smart', smartList.id)) ? 'active' : ''}`}
+                                  onClick={() =>
+                                    void handleToggleFavorite(
+                                      'smart',
+                                      smartList.id,
+                                      favoriteItemIdSet.has(favoriteItemKey('smart', smartList.id)),
+                                    )
+                                  }
+                                >
+                                  {favoriteItemIdSet.has(favoriteItemKey('smart', smartList.id)) ? 'Unfavorite' : 'Favorite'}
+                                </button>
                                 <button className="ghost-button" onClick={() => editSmartList(smartList)}>
                                   Edit
                                 </button>

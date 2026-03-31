@@ -28,6 +28,7 @@ const METADATA_COLLECTION_NAME = 'taskmanager-meta'
 const SMART_COLLECTION_NAME = 'taskmanager-smart'
 const METADATA_RESOURCE_NAME = 'taskmanager-metadata.ics'
 const MAX_REDIRECTS = 5
+const DAV_REQUEST_TIMEOUT_MS = 4_000
 const HIDDEN_COLLECTION_TARGETS = [
   { kind: 'metadata' as const, slug: METADATA_COLLECTION_NAME, displayName: 'TaskManager Metadata' },
   { kind: 'smart' as const, slug: SMART_COLLECTION_NAME, displayName: 'TaskManager Smart Lists' },
@@ -194,6 +195,7 @@ async function proxyRequest(url: string, init: RequestInit, proxyUrl: string): P
     headers: {
       'Content-Type': 'application/json',
     },
+    signal: init.signal,
     body: JSON.stringify({
       url,
       method: init.method ?? 'GET',
@@ -266,20 +268,23 @@ async function davRequest(
   if (init.body && !headers.has('Content-Type')) {
     headers.set('Content-Type', 'application/xml; charset=utf-8')
   }
-
+  const controller = new AbortController()
+  const timeoutId = window.setTimeout(() => controller.abort(new Error('Request timed out.')), DAV_REQUEST_TIMEOUT_MS)
   let response: Response
   try {
     if (connection.connectionMode === 'proxy') {
       if (!connection.proxyUrl.trim()) {
         throw new Error('Proxy URL is required for Proxy mode.')
       }
-      response = await proxyRequest(url, { ...init, headers }, connection.proxyUrl)
+      response = await proxyRequest(url, { ...init, headers, signal: controller.signal }, connection.proxyUrl)
     } else {
-      response = await directRequest(url, { ...init, headers })
+      response = await directRequest(url, { ...init, headers, signal: controller.signal })
     }
   } catch (error) {
+    window.clearTimeout(timeoutId)
     throw new Error(connectionErrorMessage(connection, error))
   }
+  window.clearTimeout(timeoutId)
 
   if (!response.ok && response.status !== 207 && !init.allowStatuses?.includes(response.status)) {
     const message = await response.text()
@@ -1173,6 +1178,8 @@ function serializeMetadataDocument(doc: MetadataDocument, taskCollections: TaskC
     ),
     collectionOrder: doc.collectionOrder.map((collectionId) => collectionUrlById.get(collectionId) ?? collectionId),
     smartListOrder: doc.smartListOrder,
+    favoriteItemIds: doc.favoriteItemIds,
+    favoriteOrder: doc.favoriteOrder,
     taskListOrderings: Object.fromEntries(
       Object.entries(doc.taskListOrderings).map(([collectionId, ordering]) => [
         collectionUrlById.get(collectionId) ?? collectionId,
@@ -1319,6 +1326,12 @@ function normalizeMetadataDocument(
   const normalizedSmartListOrder = Array.isArray(rawDoc.smartListOrder)
     ? rawDoc.smartListOrder.map(String)
     : []
+  const normalizedFavoriteItemIds = Array.isArray(rawDoc.favoriteItemIds)
+    ? rawDoc.favoriteItemIds.map(String)
+    : []
+  const normalizedFavoriteOrder = Array.isArray(rawDoc.favoriteOrder)
+    ? rawDoc.favoriteOrder.map(String)
+    : []
   const normalizedTaskListOrderings = Object.fromEntries(
     Object.entries(rawDoc.taskListOrderings ?? {}).flatMap(([storedCollectionRef, ordering]) => {
       const collectionId = collectionIdByRef.get(extractCollectionRef(storedCollectionRef))
@@ -1344,6 +1357,8 @@ function normalizeMetadataDocument(
     collectionParents: normalizedCollectionParents,
     collectionOrder: normalizedCollectionOrder,
     smartListOrder: normalizedSmartListOrder,
+    favoriteItemIds: normalizedFavoriteItemIds,
+    favoriteOrder: normalizedFavoriteOrder,
     taskListOrderings: normalizedTaskListOrderings,
     taskListShowCompleted: normalizedTaskListShowCompleted,
     manualTaskOrder: normalizeManualTaskOrder(normalizedManualTaskOrder),
