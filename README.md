@@ -2,6 +2,8 @@
 
 TaskManagerWebDav is a CalDAV-first task manager PWA built with React, TypeScript, and Vite. It connects to CalDAV servers either directly from the browser or through an optional standalone proxy, discovers `VTODO` collections, syncs tasks into IndexedDB, and provides app-managed folders, nested tags, and smart lists.
 
+This repository now also contains a native Python desktop target in [`desktop_python/`](/home/jsoest/Repositories/TaskManagerWebDav/desktop_python), built with PySide6 and using direct CalDAV access without a proxy.
+
 ## Features
 
 - Multiple CalDAV accounts
@@ -20,6 +22,29 @@ TaskManagerWebDav is a CalDAV-first task manager PWA built with React, TypeScrip
 npm install
 npm run dev
 ```
+
+## Native Python Desktop
+
+The native desktop rewrite lives in [`desktop_python/`](/home/jsoest/Repositories/TaskManagerWebDav/desktop_python).
+
+It uses:
+
+- PySide6 for the desktop UI
+- direct native CalDAV access, so no proxy server is needed
+- SQLite for local persistence
+- OS keychain-backed password storage through Python `keyring`
+
+Development:
+
+```bash
+cd desktop_python
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -e .
+python -m taskmanager_desktop
+```
+
+Desktop CI packaging is configured in [`.github/workflows/publish-python-desktop.yml`](/home/jsoest/Repositories/TaskManagerWebDav/.github/workflows/publish-python-desktop.yml).
 
 ## CalDAV Connection Modes
 

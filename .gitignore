@@ -12,6 +12,11 @@ dist
 dist-ssr
 *.local
 docker-data/
+desktop_python/build
+desktop_python/dist
+desktop_python/.venv
+desktop_python/**/*.pyc
+desktop_python/**/__pycache__
 
 # Editor directories and files
 .vscode/*
