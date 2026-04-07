@@ -1,5 +1,11 @@
 # Release Notes
 
+## 2026-04-07
+
+### Markdown preview
+- Fixed task-description preview rendering so single newlines are preserved in preview/view mode instead of only blank-line paragraph breaks.
+- Updated the markdown preview pipeline so italic markdown renders correctly alongside the existing GitHub-flavored markdown support.
+
 ## 2026-03-31
 
 ### Offline handling

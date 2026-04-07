@@ -2,6 +2,7 @@ import { useCallback, useDeferredValue, useEffect, useMemo, useRef, useState } f
 import rehypeRaw from 'rehype-raw'
 import rehypeSanitize from 'rehype-sanitize'
 import ReactMarkdown from 'react-markdown'
+import remarkBreaks from 'remark-breaks'
 import remarkGfm from 'remark-gfm'
 import './App.css'
 import {
@@ -4434,7 +4435,7 @@ function App() {
                 {descriptionMode === 'display' ? (
                   <div className="markdown-display" onClick={() => setDescriptionMode('edit')}>
                     <ReactMarkdown
-                      remarkPlugins={[remarkGfm]}
+                      remarkPlugins={[remarkGfm, remarkBreaks]}
                       rehypePlugins={[rehypeRaw, rehypeSanitize]}
                       components={{
                         a: (props) => <a {...props} target="_blank" rel="noreferrer" />,
