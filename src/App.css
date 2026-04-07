@@ -1065,6 +1065,10 @@ button {
 
 .markdown-display input[type='checkbox'] {
   margin-right: 8px;
+  width: 1rem;
+  height: 1rem;
+  accent-color: var(--accent);
+  vertical-align: text-bottom;
 }
 
 .empty-state {

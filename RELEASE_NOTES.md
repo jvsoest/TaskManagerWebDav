@@ -5,6 +5,7 @@
 ### Markdown preview
 - Fixed task-description preview rendering so single newlines are preserved in preview/view mode instead of only blank-line paragraph breaks.
 - Updated the markdown preview pipeline so italic markdown renders correctly alongside the existing GitHub-flavored markdown support.
+- Updated markdown task-list checkbox styling so checked items use the app accent color instead of a washed-out browser default.
 
 ## 2026-03-31
 
