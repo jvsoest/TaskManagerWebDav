@@ -1,5 +1,17 @@
 # Release Notes
 
+## 2026-04-08
+
+### Integrated runtime
+- Standardized the app on one integrated runtime where the same Node application serves the UI and exposes the CalDAV backend on the same origin.
+- Removed the frontend connection-mode split and external proxy URL field so accounts now connect with only label, server URL, username, and password.
+- Added a same-origin backend health endpoint and switched CalDAV transport to the built-in `/dav` backend route.
+
+### Desktop packaging
+- Added an Electron desktop wrapper that starts the bundled integrated app server locally and loads the same application UI.
+- Added desktop packaging configuration and a GitHub Actions workflow to build Windows, macOS, and Linux desktop artifacts.
+- Removed the GitHub Pages deployment workflow so the product now targets integrated self-hosted web/PWA deployment plus desktop packaging.
+
 ## 2026-04-07
 
 ### Markdown preview

@@ -142,14 +142,13 @@ const emptySnapshot: AppSnapshot = {
 const emptyConnection: AccountConnectionInput = {
   label: '',
   serverUrl: '',
-  connectionMode: 'direct',
-  proxyUrl: '',
   username: '',
   password: '',
 }
 
 const CACHE_RESET_FORM_KEY = 'taskmanagerwebdav:cache-reset-form'
 const CACHE_RESET_MESSAGE_KEY = 'taskmanagerwebdav:cache-reset-message'
+const BACKEND_HEALTH_ENDPOINT = '/api/health'
 const CONNECTIVITY_PROBE_MIN_INTERVAL_MS = 3 * 60_000
 const CONNECTIVITY_RECOVERY_INTERVAL_MS = 3 * 60_000
 
@@ -602,8 +601,6 @@ function App() {
             ...current,
             label: parsed.label ?? '',
             serverUrl: parsed.serverUrl ?? '',
-            connectionMode: parsed.connectionMode === 'proxy' ? 'proxy' : 'direct',
-            proxyUrl: parsed.proxyUrl ?? '',
             username: parsed.username ?? '',
             password: '',
           }))
@@ -819,22 +816,13 @@ function App() {
         const timeoutId = window.setTimeout(() => controller.abort(new Error('Connectivity probe timed out.')), 2_500)
 
         try {
-          if (account.connectionMode === 'proxy' && (account.proxyUrl ?? '').trim()) {
-            await fetch(account.proxyUrl ?? '', {
-              method: 'POST',
-              headers: {
-                'Content-Type': 'application/json',
-              },
-              body: '{}',
-              signal: controller.signal,
-            })
-          } else {
-            await fetch(account.serverUrl, {
-              method: 'GET',
-              mode: 'no-cors',
-              cache: 'no-store',
-              signal: controller.signal,
-            })
+          const response = await fetch(BACKEND_HEALTH_ENDPOINT, {
+            method: 'GET',
+            cache: 'no-store',
+            signal: controller.signal,
+          })
+          if (!response.ok) {
+            throw new Error(`Backend health check failed (${response.status}).`)
           }
 
           setConnectivityState('online')
@@ -2248,11 +2236,6 @@ function App() {
       return
     }
 
-    if (connectionForm.connectionMode === 'proxy' && !connectionForm.proxyUrl.trim()) {
-      setMessage('Proxy URL is required when using Proxy mode.')
-      return
-    }
-
     const accountId = newId()
     setBusy(true)
     setMessage('Discovering task collections...')
@@ -2263,8 +2246,6 @@ function App() {
         id: accountId,
         label: connectionForm.label || discovery.accountDisplayName || connectionForm.username,
         serverUrl: connectionForm.serverUrl,
-        connectionMode: connectionForm.connectionMode,
-        proxyUrl: connectionForm.connectionMode === 'proxy' ? connectionForm.proxyUrl.trim() : undefined,
         username: connectionForm.username,
         password: connectionForm.password,
         displayName: discovery.accountDisplayName,
@@ -3265,8 +3246,6 @@ function App() {
         ? {
             label: activeAccount.label,
             serverUrl: activeAccount.serverUrl,
-            connectionMode: activeAccount.connectionMode,
-            proxyUrl: activeAccount.proxyUrl ?? '',
             username: activeAccount.username,
             password: '',
           }
@@ -3279,9 +3258,7 @@ function App() {
         window.sessionStorage.setItem(CACHE_RESET_FORM_KEY, JSON.stringify(reconnectForm))
         window.sessionStorage.setItem(
           CACHE_RESET_MESSAGE_KEY,
-          reconnectForm.connectionMode === 'proxy'
-            ? 'Local cache cleared. Proxy settings were restored. Re-enter the password and reconnect.'
-            : 'Local cache cleared. Re-enter the password and reconnect.',
+          'Local cache cleared. Re-enter the password and reconnect.',
         )
       }
 
@@ -3906,18 +3883,6 @@ function App() {
                     </div>
 
                     <div className="settings-form">
-                      <select
-                        value={connectionForm.connectionMode}
-                        onChange={(event) =>
-                          setConnectionForm((current) => ({
-                            ...current,
-                            connectionMode: event.target.value as AccountConnectionInput['connectionMode'],
-                          }))
-                        }
-                      >
-                        <option value="direct">Direct CalDAV</option>
-                        <option value="proxy">CalDAV via Proxy</option>
-                      </select>
                       <input
                         value={connectionForm.label}
                         onChange={(event) =>
@@ -3932,15 +3897,6 @@ function App() {
                         }
                         placeholder="Server URL"
                       />
-                      {connectionForm.connectionMode === 'proxy' && (
-                        <input
-                          value={connectionForm.proxyUrl}
-                          onChange={(event) =>
-                            setConnectionForm((current) => ({ ...current, proxyUrl: event.target.value }))
-                          }
-                          placeholder="Proxy URL (example: https://proxy.example.com or /dav)"
-                        />
-                      )}
                       <input
                         value={connectionForm.username}
                         onChange={(event) =>

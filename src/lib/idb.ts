@@ -17,8 +17,6 @@ function normalizeSnapshot(snapshot: AppSnapshot): AppSnapshot {
   return {
     accounts: snapshot.accounts.map((account) => ({
       ...account,
-      connectionMode: account.connectionMode ?? 'direct',
-      proxyUrl: account.proxyUrl ?? '',
     })),
     collections: snapshot.collections,
     tasks: snapshot.tasks.map(normalizeTask),

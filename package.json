@@ -2,6 +2,7 @@
   "name": "taskmanagerwebdav",
   "private": true,
   "version": "0.0.0",
+  "main": "electron/main.mjs",
   "type": "module",
   "scripts": {
     "dev": "vite",
@@ -11,7 +12,9 @@
     "start": "node proxy/server.mjs",
     "proxy": "node proxy/server.mjs",
     "proxy:test-auth": "node proxy/test-auth.mjs",
-    "migrate:task-ids": "node scripts/migrate-task-ids-to-collection-scope.mjs"
+    "migrate:task-ids": "node scripts/migrate-task-ids-to-collection-scope.mjs",
+    "desktop:dev": "npm run build && electron .",
+    "desktop:dist": "npm run build && electron-builder"
   },
   "dependencies": {
     "react": "^18.3.1",
@@ -29,10 +32,44 @@
     "@typescript-eslint/eslint-plugin": "^7.15.0",
     "@typescript-eslint/parser": "^7.15.0",
     "@vitejs/plugin-react": "^4.3.1",
+    "electron": "^35.1.5",
+    "electron-builder": "^26.0.12",
     "eslint": "^8.57.0",
     "eslint-plugin-react-hooks": "^4.6.2",
     "eslint-plugin-react-refresh": "^0.4.7",
     "typescript": "^5.2.2",
     "vite": "^5.3.4"
+  },
+  "build": {
+    "appId": "co.taskmanagerwebdav.app",
+    "productName": "TaskManagerWebDav",
+    "directories": {
+      "output": "desktop-dist"
+    },
+    "files": [
+      "dist/**/*",
+      "electron/**/*",
+      "proxy/**/*",
+      "package.json"
+    ],
+    "asar": true,
+    "mac": {
+      "target": [
+        "dmg"
+      ]
+    },
+    "linux": {
+      "target": [
+        "AppImage",
+        "deb"
+      ],
+      "category": "Office"
+    },
+    "win": {
+      "target": [
+        "nsis",
+        "portable"
+      ]
+    }
   }
 }

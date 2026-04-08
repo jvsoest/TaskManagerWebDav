@@ -24,17 +24,17 @@ import type {
   TaskReminder,
 } from '../types'
 
+const BACKEND_DAV_ENDPOINT = '/dav'
 const METADATA_COLLECTION_NAME = 'taskmanager-meta'
 const SMART_COLLECTION_NAME = 'taskmanager-smart'
 const METADATA_RESOURCE_NAME = 'taskmanager-metadata.ics'
-const MAX_REDIRECTS = 5
 const DAV_REQUEST_TIMEOUT_MS = 4_000
 const HIDDEN_COLLECTION_TARGETS = [
   { kind: 'metadata' as const, slug: METADATA_COLLECTION_NAME, displayName: 'TaskManager Metadata' },
   { kind: 'smart' as const, slug: SMART_COLLECTION_NAME, displayName: 'TaskManager Smart Lists' },
 ]
 
-type DavConnection = Pick<AccountConnectionInput, 'serverUrl' | 'connectionMode' | 'proxyUrl' | 'username' | 'password'>
+type DavConnection = Pick<AccountConnectionInput, 'serverUrl' | 'username' | 'password'>
 
 function isMetadataCollectionUrl(url: string): boolean {
   return (
@@ -80,8 +80,6 @@ function authHeader(username: string, password: string): string {
 function connectionFromAccount(account: Account): DavConnection {
   return {
     serverUrl: account.serverUrl,
-    connectionMode: account.connectionMode,
-    proxyUrl: account.proxyUrl ?? '',
     username: account.username,
     password: account.password,
   }
@@ -91,8 +89,6 @@ function connectionInputFromAccount(account: Account): AccountConnectionInput {
   return {
     label: account.label,
     serverUrl: account.serverUrl,
-    connectionMode: account.connectionMode,
-    proxyUrl: account.proxyUrl ?? '',
     username: account.username,
     password: account.password,
   }
@@ -144,53 +140,19 @@ function propertyHref(document: XMLDocument, propertyLocalName: string): string 
   return property ? textContent(firstDescendant(property, 'href')) : undefined
 }
 
-function isRedirectStatus(status: number): boolean {
-  return [301, 302, 303, 307, 308].includes(status)
-}
-
-function normalizeProxyUrl(proxyUrl: string): string {
-  const trimmed = proxyUrl.trim()
-  if (!trimmed) {
-    return trimmed
-  }
-
-  try {
-    return new URL(trimmed).toString().endsWith('/') ? new URL(trimmed).toString() : `${new URL(trimmed).toString()}/`
-  } catch {
-    const baseUrl =
-      typeof window !== 'undefined' ? window.location.origin : 'http://localhost'
-    const resolved = new URL(trimmed, baseUrl).toString()
-    return resolved.endsWith('/') ? resolved : `${resolved}/`
-  }
-}
-
-function isCirruxServer(serverUrl: string): boolean {
-  try {
-    const hostname = new URL(serverUrl).hostname.toLowerCase()
-    return hostname === 'api.cirrux.co' || hostname.endsWith('.cirrux.co')
-  } catch {
-    return false
-  }
-}
-
-function connectionErrorMessage(connection: DavConnection, error: unknown): string {
-  if (connection.connectionMode === 'direct' && isCirruxServer(connection.serverUrl)) {
-    return 'Cirrux exposes CalDAV for native clients, but blocks direct browser CalDAV from this app origin. Use Proxy mode with https://api.cirrux.co as the server URL and the Cirrux app password.'
-  }
-
-  if (connection.connectionMode === 'direct' && error instanceof TypeError) {
-    return 'Direct browser CalDAV access failed. This provider likely blocks cross-origin DAV requests from this app. Try Proxy mode.'
+function connectionErrorMessage(_connection: DavConnection, error: unknown): string {
+  if (error instanceof TypeError) {
+    return 'The integrated backend is unavailable. Make sure the TaskManagerWebDav server is running and try again.'
   }
 
   return error instanceof Error ? error.message : 'CalDAV request failed.'
 }
 
-async function proxyRequest(url: string, init: RequestInit, proxyUrl: string): Promise<Response> {
-  const endpoint = normalizeProxyUrl(proxyUrl)
+async function backendRequest(url: string, init: RequestInit): Promise<Response> {
   const headers = new Headers(init.headers)
   const body = typeof init.body === 'string' ? init.body : undefined
 
-  const response = await fetch(endpoint, {
+  const response = await fetch(BACKEND_DAV_ENDPOINT, {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
@@ -232,30 +194,6 @@ async function proxyRequest(url: string, init: RequestInit, proxyUrl: string): P
   })
 }
 
-async function directRequest(url: string, init: RequestInit): Promise<Response> {
-  let currentUrl = url
-
-  for (let redirects = 0; redirects <= MAX_REDIRECTS; redirects += 1) {
-    const response = await fetch(currentUrl, {
-      ...init,
-      redirect: 'manual',
-    })
-
-    if (!isRedirectStatus(response.status)) {
-      return response
-    }
-
-    const location = response.headers.get('location') ?? response.headers.get('Location')
-    if (!location) {
-      return response
-    }
-
-    currentUrl = new URL(location, currentUrl).toString()
-  }
-
-  throw new Error(`Too many redirects while requesting ${url}.`)
-}
-
 async function davRequest(
   connection: DavConnection,
   url: string,
@@ -272,14 +210,7 @@ async function davRequest(
   const timeoutId = window.setTimeout(() => controller.abort(new Error('Request timed out.')), DAV_REQUEST_TIMEOUT_MS)
   let response: Response
   try {
-    if (connection.connectionMode === 'proxy') {
-      if (!connection.proxyUrl.trim()) {
-        throw new Error('Proxy URL is required for Proxy mode.')
-      }
-      response = await proxyRequest(url, { ...init, headers, signal: controller.signal }, connection.proxyUrl)
-    } else {
-      response = await directRequest(url, { ...init, headers, signal: controller.signal })
-    }
+    response = await backendRequest(url, { ...init, headers, signal: controller.signal })
   } catch (error) {
     window.clearTimeout(timeoutId)
     throw new Error(connectionErrorMessage(connection, error))
@@ -389,10 +320,6 @@ async function fetchResourceEtag(connection: DavConnection, url: string, authori
 }
 
 async function discoverHomeSet(input: AccountConnectionInput): Promise<{ displayName: string; homeSetUrl: string }> {
-  if (input.connectionMode === 'direct' && isCirruxServer(input.serverUrl)) {
-    throw new Error(connectionErrorMessage(input, new Error('Cirrux requires proxy mode.')))
-  }
-
   const authorization = authHeader(input.username, input.password)
   const serverUrl = ensureTrailingSlash(input.serverUrl)
   const rootResponse = await davRequest(input, serverUrl, {

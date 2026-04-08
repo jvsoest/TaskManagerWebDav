@@ -4,16 +4,9 @@ import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
-const DIST_DIR = path.resolve(__dirname, '../dist')
-const PORT = Number.parseInt(process.env.PORT ?? '8080', 10)
-const ALLOWED_ORIGINS = (process.env.ALLOWED_ORIGINS ?? '*')
-  .split(',')
-  .map((value) => value.trim())
-  .filter(Boolean)
-const UPSTREAM_ALLOWLIST = (process.env.UPSTREAM_ALLOWLIST ?? '')
-  .split(',')
-  .map((value) => value.trim().toLowerCase())
-  .filter(Boolean)
+const DEFAULT_DIST_DIR = path.resolve(__dirname, '../dist')
+const DEFAULT_PORT = Number.parseInt(process.env.PORT ?? '8080', 10)
+const MAX_REDIRECTS = 5
 const ALLOWED_METHODS = new Set(['GET', 'HEAD', 'OPTIONS', 'PROPFIND', 'PROPPATCH', 'REPORT', 'PUT', 'DELETE', 'MKCALENDAR'])
 const HOP_BY_HOP_HEADERS = new Set([
   'connection',
@@ -24,7 +17,6 @@ const HOP_BY_HOP_HEADERS = new Set([
   'referer',
   'transfer-encoding',
 ])
-const MAX_REDIRECTS = 5
 const MIME_TYPES = new Map([
   ['.css', 'text/css; charset=utf-8'],
   ['.html', 'text/html; charset=utf-8'],
@@ -39,47 +31,68 @@ const MIME_TYPES = new Map([
   ['.woff2', 'font/woff2'],
 ])
 
-async function distExists() {
+function parseCsvEnv(value, fallback = '') {
+  return (value ?? fallback)
+    .split(',')
+    .map((entry) => entry.trim())
+    .filter(Boolean)
+}
+
+function createRuntimeConfig(overrides = {}) {
+  return {
+    port: overrides.port ?? DEFAULT_PORT,
+    host: overrides.host ?? '0.0.0.0',
+    distDir: overrides.distDir ?? DEFAULT_DIST_DIR,
+    allowedOrigins: overrides.allowedOrigins ?? parseCsvEnv(process.env.ALLOWED_ORIGINS, '*'),
+    upstreamAllowlist:
+      overrides.upstreamAllowlist ??
+      parseCsvEnv(process.env.UPSTREAM_ALLOWLIST).map((entry) => entry.toLowerCase()),
+  }
+}
+
+async function distExists(distDir) {
   try {
-    const stat = await fs.stat(DIST_DIR)
+    const stat = await fs.stat(distDir)
     return stat.isDirectory()
   } catch {
     return false
   }
 }
 
-function allowOrigin(origin) {
+function allowOrigin(origin, allowedOrigins) {
   if (!origin) {
-    return ALLOWED_ORIGINS[0] ?? '*'
+    return allowedOrigins[0] ?? '*'
   }
-  if (ALLOWED_ORIGINS.includes('*') || ALLOWED_ORIGINS.includes(origin)) {
+  if (allowedOrigins.includes('*') || allowedOrigins.includes(origin)) {
     return origin
   }
   return 'null'
 }
 
-function setCorsHeaders(response, origin = '') {
-  response.setHeader('Access-Control-Allow-Origin', allowOrigin(origin))
+function setCorsHeaders(response, allowedOrigins, origin = '') {
+  response.setHeader('Access-Control-Allow-Origin', allowOrigin(origin, allowedOrigins))
   response.setHeader('Access-Control-Allow-Methods', 'POST,OPTIONS')
   response.setHeader('Access-Control-Allow-Headers', 'Content-Type')
   response.setHeader('Access-Control-Max-Age', '86400')
   response.setHeader('Vary', 'Origin')
 }
 
-function writeJson(response, status, payload, origin = '') {
-  setCorsHeaders(response, origin)
+function writeJson(response, status, payload, allowedOrigins, origin = '') {
+  setCorsHeaders(response, allowedOrigins, origin)
   response.writeHead(status, {
     'Content-Type': 'application/json; charset=utf-8',
   })
   response.end(JSON.stringify(payload))
 }
 
-function isAllowedUpstream(url) {
-  if (!UPSTREAM_ALLOWLIST.length) {
+function isAllowedUpstream(url, upstreamAllowlist) {
+  if (!upstreamAllowlist.length) {
     return true
   }
 
-  return UPSTREAM_ALLOWLIST.some((entry) => url.hostname.toLowerCase() === entry || url.hostname.toLowerCase().endsWith(`.${entry}`))
+  return upstreamAllowlist.some(
+    (entry) => url.hostname.toLowerCase() === entry || url.hostname.toLowerCase().endsWith(`.${entry}`),
+  )
 }
 
 function sanitizeHeaders(headers) {
@@ -125,19 +138,19 @@ async function forwardRequest(url, method, headers, body) {
   throw new Error(`Too many redirects while forwarding ${method} ${url}`)
 }
 
-async function handleDavProxy(request, response) {
+async function handleDavProxy(request, response, config) {
   const origin = request.headers.origin ?? ''
-  const requestPath = new URL(request.url ?? '/', `http://${request.headers.host ?? `localhost:${PORT}`}`).pathname
+  const requestPath = new URL(request.url ?? '/', `http://${request.headers.host ?? `localhost:${config.port}`}`).pathname
 
   if (request.method === 'OPTIONS') {
-    setCorsHeaders(response, origin)
+    setCorsHeaders(response, config.allowedOrigins, origin)
     response.writeHead(204)
     response.end()
     return
   }
 
   if (!['/', '/dav'].includes(requestPath) || request.method !== 'POST') {
-    writeJson(response, 404, { error: 'Not found.' }, origin)
+    writeJson(response, 404, { error: 'Not found.' }, config.allowedOrigins, origin)
     return
   }
 
@@ -148,17 +161,17 @@ async function handleDavProxy(request, response) {
     const targetUrl = new URL(String(payload.url ?? ''))
 
     if (!['http:', 'https:'].includes(targetUrl.protocol)) {
-      writeJson(response, 400, { error: 'Only HTTP(S) upstream URLs are allowed.' }, origin)
+      writeJson(response, 400, { error: 'Only HTTP(S) upstream URLs are allowed.' }, config.allowedOrigins, origin)
       return
     }
 
     if (!ALLOWED_METHODS.has(method)) {
-      writeJson(response, 400, { error: `Unsupported DAV method: ${method}` }, origin)
+      writeJson(response, 400, { error: `Unsupported DAV method: ${method}` }, config.allowedOrigins, origin)
       return
     }
 
-    if (!isAllowedUpstream(targetUrl)) {
-      writeJson(response, 403, { error: `Upstream host ${targetUrl.hostname} is not allowed.` }, origin)
+    if (!isAllowedUpstream(targetUrl, config.upstreamAllowlist)) {
+      writeJson(response, 403, { error: `Upstream host ${targetUrl.hostname} is not allowed.` }, config.allowedOrigins, origin)
       return
     }
 
@@ -176,6 +189,7 @@ async function handleDavProxy(request, response) {
         url: upstreamResponse.url,
         body: text,
       },
+      config.allowedOrigins,
       origin,
     )
   } catch (error) {
@@ -183,6 +197,7 @@ async function handleDavProxy(request, response) {
       response,
       500,
       { error: error instanceof Error ? error.message : 'Proxy request failed.' },
+      config.allowedOrigins,
       origin,
     )
   }
@@ -200,18 +215,18 @@ async function serveFile(response, filePath) {
   response.end(content)
 }
 
-async function handleStaticRequest(request, response) {
-  if (!(await distExists())) {
+async function handleStaticRequest(request, response, config) {
+  if (!(await distExists(config.distDir))) {
     response.writeHead(404, { 'Content-Type': 'text/plain; charset=utf-8' })
-    response.end('dist/ not found. Build the app before starting the combined server.')
+    response.end('dist/ not found. Build the app before starting the integrated server.')
     return
   }
 
-  const requestUrl = new URL(request.url ?? '/', `http://${request.headers.host ?? `localhost:${PORT}`}`)
-  let filePath = path.join(DIST_DIR, decodeURIComponent(requestUrl.pathname))
+  const requestUrl = new URL(request.url ?? '/', `http://${request.headers.host ?? `localhost:${config.port}`}`)
+  let filePath = path.join(config.distDir, decodeURIComponent(requestUrl.pathname))
 
   if (requestUrl.pathname === '/') {
-    filePath = path.join(DIST_DIR, 'index.html')
+    filePath = path.join(config.distDir, 'index.html')
   }
 
   try {
@@ -230,29 +245,86 @@ async function handleStaticRequest(request, response) {
     }
   }
 
-  await serveFile(response, path.join(DIST_DIR, 'index.html'))
+  await serveFile(response, path.join(config.distDir, 'index.html'))
 }
 
-const server = http.createServer(async (request, response) => {
-  const requestPath = new URL(request.url ?? '/', `http://${request.headers.host ?? `localhost:${PORT}`}`).pathname
+function handleHealth(response) {
+  response.writeHead(200, {
+    'Content-Type': 'application/json; charset=utf-8',
+    'Cache-Control': 'no-store',
+  })
+  response.end(JSON.stringify({ ok: true }))
+}
 
-  if (
-    requestPath.startsWith('/dav') ||
-    (requestPath === '/' && ['POST', 'OPTIONS'].includes(request.method ?? 'GET'))
-  ) {
-    await handleDavProxy(request, response)
-    return
+export function createTaskManagerServer(overrides = {}) {
+  const config = createRuntimeConfig(overrides)
+  const server = http.createServer(async (request, response) => {
+    const requestPath = new URL(request.url ?? '/', `http://${request.headers.host ?? `localhost:${config.port}`}`).pathname
+
+    if (requestPath === '/api/health') {
+      handleHealth(response)
+      return
+    }
+
+    if (
+      requestPath.startsWith('/dav') ||
+      (requestPath === '/' && ['POST', 'OPTIONS'].includes(request.method ?? 'GET'))
+    ) {
+      await handleDavProxy(request, response, config)
+      return
+    }
+
+    if (request.method !== 'GET' && request.method !== 'HEAD') {
+      response.writeHead(405, { 'Content-Type': 'text/plain; charset=utf-8' })
+      response.end('Method Not Allowed')
+      return
+    }
+
+    await handleStaticRequest(request, response, config)
+  })
+
+  return server
+}
+
+export async function startTaskManagerServer(overrides = {}) {
+  const config = createRuntimeConfig(overrides)
+  const server = createTaskManagerServer(config)
+
+  await new Promise((resolve, reject) => {
+    server.once('error', reject)
+    server.listen(config.port, config.host, () => {
+      server.off('error', reject)
+      resolve()
+    })
+  })
+
+  const address = server.address()
+  const port = typeof address === 'object' && address ? address.port : config.port
+
+  return {
+    server,
+    port,
+    url: `http://${config.host === '0.0.0.0' ? '127.0.0.1' : config.host}:${port}`,
+    close: () =>
+      new Promise((resolve, reject) => {
+        server.close((error) => {
+          if (error) {
+            reject(error)
+            return
+          }
+          resolve()
+        })
+      }),
   }
+}
 
-  if (request.method !== 'GET' && request.method !== 'HEAD') {
-    response.writeHead(405, { 'Content-Type': 'text/plain; charset=utf-8' })
-    response.end('Method Not Allowed')
-    return
-  }
-
-  await handleStaticRequest(request, response)
-})
-
-server.listen(PORT, () => {
-  console.log(`TaskManagerWebDav server listening on http://localhost:${PORT}`)
-})
+if (import.meta.url === `file://${process.argv[1]}`) {
+  startTaskManagerServer({ port: DEFAULT_PORT, host: '0.0.0.0' })
+    .then(({ url }) => {
+      console.log(`TaskManagerWebDav server listening on ${url}`)
+    })
+    .catch((error) => {
+      console.error(error instanceof Error ? error.message : error)
+      process.exitCode = 1
+    })
+}
