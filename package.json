@@ -1,7 +1,11 @@
 {
   "name": "taskmanagerwebdav",
   "private": true,
-  "version": "0.0.0",
+  "version": "1.0.0",
+  "author": {
+    "name": "Johan van Soest",
+    "email": "info@johanvansoest.nl"
+  },
   "main": "electron/main.mjs",
   "type": "module",
   "scripts": {
