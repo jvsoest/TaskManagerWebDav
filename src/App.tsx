@@ -318,6 +318,44 @@ function normalizeDateOnlyInput(value?: string): string {
   return new Date(date.getTime() - date.getTimezoneOffset() * 60_000).toISOString().slice(0, 10)
 }
 
+function desktopBridge(): TaskManagerDesktopBridge | undefined {
+  if (typeof window === 'undefined') {
+    return undefined
+  }
+
+  return window.taskManagerDesktop
+}
+
+async function hydrateDesktopAccountPasswords(snapshot: AppSnapshot): Promise<AppSnapshot> {
+  const bridge = desktopBridge()
+  if (!bridge?.isDesktop) {
+    return snapshot
+  }
+
+  const accounts = await Promise.all(
+    snapshot.accounts.map(async (account) => {
+      const storedPassword = await bridge.getAccountPassword(account.id)
+      if (storedPassword) {
+        return {
+          ...account,
+          password: storedPassword,
+        }
+      }
+
+      if (account.password) {
+        await bridge.setAccountPassword(account.id, account.password)
+      }
+
+      return account
+    }),
+  )
+
+  return {
+    ...snapshot,
+    accounts,
+  }
+}
+
 function collectionColorStyle(color?: string): React.CSSProperties | undefined {
   if (!color) {
     return undefined
@@ -582,45 +620,54 @@ function App() {
     return Number.isNaN(parsed.getTime()) ? __BUILD_TIMESTAMP__ : parsed.toLocaleString()
   }, [])
   const buildCommitLabel = __BUILD_COMMIT__
+  const isDesktopRuntime = desktopBridge()?.isDesktop === true
 
   useEffect(() => {
-    void loadSnapshot().then((loaded) => {
-      setSnapshot(loaded)
-      setActiveAccountId(loaded.accounts[0]?.id)
-      setHydrated(true)
+    void (async () => {
+      try {
+        const loaded = await loadSnapshot()
+        const hydratedSnapshot = await hydrateDesktopAccountPasswords(loaded)
+        setSnapshot(hydratedSnapshot)
+        setActiveAccountId(hydratedSnapshot.accounts[0]?.id)
+        setHydrated(true)
 
-      if (typeof window === 'undefined') {
-        return
-      }
-
-      const pendingForm = window.sessionStorage.getItem(CACHE_RESET_FORM_KEY)
-      if (pendingForm) {
-        try {
-          const parsed = JSON.parse(pendingForm) as Partial<AccountConnectionInput>
-          setConnectionForm((current) => ({
-            ...current,
-            label: parsed.label ?? '',
-            serverUrl: parsed.serverUrl ?? '',
-            username: parsed.username ?? '',
-            password: '',
-          }))
-          setWorkspaceMode('settings')
-          setSettingsSection('accounts')
-          setActiveAccountId(undefined)
-          setActiveView(undefined)
-        } catch {
-          // Ignore malformed reconnect hints.
-        } finally {
-          window.sessionStorage.removeItem(CACHE_RESET_FORM_KEY)
+        if (typeof window === 'undefined') {
+          return
         }
-      }
 
-      const pendingMessage = window.sessionStorage.getItem(CACHE_RESET_MESSAGE_KEY)
-      if (pendingMessage) {
-        setMessage(pendingMessage)
-        window.sessionStorage.removeItem(CACHE_RESET_MESSAGE_KEY)
+        const pendingForm = window.sessionStorage.getItem(CACHE_RESET_FORM_KEY)
+        if (pendingForm) {
+          try {
+            const parsed = JSON.parse(pendingForm) as Partial<AccountConnectionInput>
+            setConnectionForm((current) => ({
+              ...current,
+              label: parsed.label ?? '',
+              serverUrl: parsed.serverUrl ?? '',
+              username: parsed.username ?? '',
+              password: '',
+            }))
+            setWorkspaceMode('settings')
+            setSettingsSection('accounts')
+            setActiveAccountId(undefined)
+            setActiveView(undefined)
+          } catch {
+            // Ignore malformed reconnect hints.
+          } finally {
+            window.sessionStorage.removeItem(CACHE_RESET_FORM_KEY)
+          }
+        }
+
+        const pendingMessage = window.sessionStorage.getItem(CACHE_RESET_MESSAGE_KEY)
+        if (pendingMessage) {
+          setMessage(pendingMessage)
+          window.sessionStorage.removeItem(CACHE_RESET_MESSAGE_KEY)
+        }
+      } catch (error) {
+        console.error('Failed to load local snapshot', error)
+        setHydrated(true)
+        setMessage(error instanceof Error ? error.message : 'Failed to load local data.')
       }
-    })
+    })()
   }, [])
 
   useEffect(() => {
@@ -628,12 +675,12 @@ function App() {
       return
     }
 
-    void saveSnapshot(snapshot).catch((error) => {
+    void saveSnapshot(snapshot, { stripAccountPasswords: isDesktopRuntime }).catch((error) => {
       const failure = error instanceof Error ? error.message : 'Failed to persist local data.'
       console.error('Failed to persist local snapshot', error)
       setMessage(failure)
     })
-  }, [hydrated, snapshot])
+  }, [hydrated, isDesktopRuntime, snapshot])
 
   useEffect(() => {
     snapshotRef.current = snapshot
@@ -2242,6 +2289,9 @@ function App() {
 
     try {
       const discovery = await discoverAccount(connectionForm, accountId)
+      if (isDesktopRuntime) {
+        await desktopBridge()?.setAccountPassword(accountId, connectionForm.password)
+      }
       const account: Account = {
         id: accountId,
         label: connectionForm.label || discovery.accountDisplayName || connectionForm.username,

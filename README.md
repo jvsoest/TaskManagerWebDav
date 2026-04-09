@@ -115,6 +115,17 @@ Package targets:
 - macOS: DMG
 - Linux: AppImage and `.deb`
 
+Desktop notes:
+
+- Electron uses a fixed local origin so desktop app data survives across restarts.
+- Desktop account passwords are stored in Electron `safeStorage`-encrypted app data instead of browser storage.
+- Release signing uses standard Electron Builder environment variables:
+  - `CSC_LINK`
+  - `CSC_KEY_PASSWORD`
+  - `APPLE_ID`
+  - `APPLE_APP_SPECIFIC_PASSWORD`
+  - `APPLE_TEAM_ID`
+
 ## Local CalDAV test server
 
 This repository includes a Docker Compose CalDAV server based on Radicale for local testing.

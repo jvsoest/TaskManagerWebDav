@@ -1,5 +1,13 @@
 # Release Notes
 
+## 2026-04-09
+
+### Desktop app
+- Fixed Electron desktop persistence by switching the desktop app to a stable localhost origin so local data survives across restarts.
+- Moved desktop account passwords out of browser storage and into Electron-protected desktop credential storage.
+- Added a secure Electron preload bridge for desktop credential access from the renderer.
+- Added macOS signing/notarization hooks and desktop workflow secret wiring for trusted desktop release builds.
+
 ## 2026-04-08
 
 ### Integrated runtime

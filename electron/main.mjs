@@ -1,9 +1,105 @@
-import { app, BrowserWindow, dialog } from 'electron'
+import fs from 'node:fs/promises'
+import path from 'node:path'
+import { fileURLToPath } from 'node:url'
+import { app, BrowserWindow, dialog, ipcMain, safeStorage } from 'electron'
 import { startTaskManagerServer } from '../proxy/server.mjs'
+
+const __dirname = path.dirname(fileURLToPath(import.meta.url))
+const DESKTOP_HOST = '127.0.0.1'
+const DESKTOP_PORT = 51880
+const CREDENTIALS_FILE_NAME = 'desktop-credentials.json'
 
 let mainWindow
 let serverHandle
 let quitting = false
+
+function credentialsFilePath() {
+  return path.join(app.getPath('userData'), CREDENTIALS_FILE_NAME)
+}
+
+async function readCredentialStore() {
+  try {
+    const raw = await fs.readFile(credentialsFilePath(), 'utf8')
+    return JSON.parse(raw)
+  } catch {
+    return {}
+  }
+}
+
+async function writeCredentialStore(store) {
+  await fs.mkdir(app.getPath('userData'), { recursive: true })
+  await fs.writeFile(credentialsFilePath(), JSON.stringify(store), 'utf8')
+}
+
+function encodePassword(password) {
+  if (safeStorage.isEncryptionAvailable()) {
+    return {
+      mode: 'safeStorage',
+      value: safeStorage.encryptString(password).toString('base64'),
+    }
+  }
+
+  return {
+    mode: 'plain',
+    value: password,
+  }
+}
+
+function decodePassword(entry) {
+  if (!entry) {
+    return null
+  }
+
+  if (entry.mode === 'safeStorage') {
+    try {
+      return safeStorage.decryptString(Buffer.from(entry.value, 'base64'))
+    } catch {
+      return null
+    }
+  }
+
+  if (entry.mode === 'plain') {
+    return entry.value
+  }
+
+  return null
+}
+
+async function registerCredentialHandlers() {
+  ipcMain.handle('desktop:credentials:get', async (_event, accountId) => {
+    const store = await readCredentialStore()
+    return decodePassword(store[accountId])
+  })
+  ipcMain.handle('desktop:credentials:set', async (_event, accountId, password) => {
+    const store = await readCredentialStore()
+    store[accountId] = encodePassword(password)
+    await writeCredentialStore(store)
+    return true
+  })
+  ipcMain.handle('desktop:credentials:delete', async (_event, accountId) => {
+    const store = await readCredentialStore()
+    delete store[accountId]
+    await writeCredentialStore(store)
+    return true
+  })
+}
+
+async function waitForHealth(url, attempts = 40) {
+  for (let index = 0; index < attempts; index += 1) {
+    try {
+      const response = await fetch(`${url}/api/health`, { cache: 'no-store' })
+      if (response.ok) {
+        return
+      }
+    } catch {
+      // Server is not ready yet.
+    }
+
+    await new Promise((resolve) => setTimeout(resolve, 150))
+  }
+
+  throw new Error('The integrated backend did not become ready in time.')
+}
 
 async function ensureServerStarted() {
   if (serverHandle) {
@@ -11,9 +107,10 @@ async function ensureServerStarted() {
   }
 
   serverHandle = await startTaskManagerServer({
-    host: '127.0.0.1',
-    port: 0,
+    host: DESKTOP_HOST,
+    port: DESKTOP_PORT,
   })
+  await waitForHealth(serverHandle.url)
 
   return serverHandle
 }
@@ -31,7 +128,8 @@ async function createMainWindow() {
     webPreferences: {
       contextIsolation: true,
       nodeIntegration: false,
-      sandbox: true,
+      sandbox: false,
+      preload: path.join(__dirname, 'preload.mjs'),
     },
   })
 
@@ -77,6 +175,7 @@ app.on('activate', () => {
 
 app.whenReady()
   .then(async () => {
+    await registerCredentialHandlers()
     await createMainWindow()
   })
   .catch(async (error) => {

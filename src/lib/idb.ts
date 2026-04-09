@@ -211,8 +211,27 @@ export async function loadSnapshot(): Promise<AppSnapshot> {
   }
 }
 
-export async function saveSnapshot(snapshot: AppSnapshot): Promise<void> {
-  saveFallbackSnapshot(snapshot)
+type SaveSnapshotOptions = {
+  stripAccountPasswords?: boolean
+}
+
+function snapshotForPersistence(snapshot: AppSnapshot, options: SaveSnapshotOptions): AppSnapshot {
+  if (!options.stripAccountPasswords) {
+    return snapshot
+  }
+
+  return {
+    ...snapshot,
+    accounts: snapshot.accounts.map((account) => ({
+      ...account,
+      password: '',
+    })),
+  }
+}
+
+export async function saveSnapshot(snapshot: AppSnapshot, options: SaveSnapshotOptions = {}): Promise<void> {
+  const persistedSnapshot = snapshotForPersistence(snapshot, options)
+  saveFallbackSnapshot(persistedSnapshot)
 
   const db = await openDb()
   const transaction = db.transaction(STORES, 'readwrite')
@@ -234,14 +253,14 @@ export async function saveSnapshot(snapshot: AppSnapshot): Promise<void> {
   settings.clear()
   queuedMutations.clear()
 
-  snapshot.accounts.forEach((entry) => accounts.put(entry))
-  snapshot.collections.forEach((entry) => collections.put(entry))
-  snapshot.tasks.forEach((entry) => tasks.put(entry))
-  snapshot.smartLists.forEach((entry) => smartLists.put(entry))
-  snapshot.metadataDocs.forEach((entry) => metadataDocs.put(entry))
-  snapshot.syncLogs.forEach((entry) => syncLogs.put(entry))
-  settings.put({ id: 'app', ...snapshot.settings })
-  snapshot.queuedMutations.forEach((entry) => queuedMutations.put(entry))
+  persistedSnapshot.accounts.forEach((entry) => accounts.put(entry))
+  persistedSnapshot.collections.forEach((entry) => collections.put(entry))
+  persistedSnapshot.tasks.forEach((entry) => tasks.put(entry))
+  persistedSnapshot.smartLists.forEach((entry) => smartLists.put(entry))
+  persistedSnapshot.metadataDocs.forEach((entry) => metadataDocs.put(entry))
+  persistedSnapshot.syncLogs.forEach((entry) => syncLogs.put(entry))
+  settings.put({ id: 'app', ...persistedSnapshot.settings })
+  persistedSnapshot.queuedMutations.forEach((entry) => queuedMutations.put(entry))
 
   await wrapTransaction(transaction)
 }
