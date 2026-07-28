@@ -148,9 +148,6 @@ const emptyConnection: AccountConnectionInput = {
 
 const CACHE_RESET_FORM_KEY = 'taskmanagerwebdav:cache-reset-form'
 const CACHE_RESET_MESSAGE_KEY = 'taskmanagerwebdav:cache-reset-message'
-const BACKEND_HEALTH_ENDPOINT = '/api/health'
-const CONNECTIVITY_PROBE_MIN_INTERVAL_MS = 3 * 60_000
-const CONNECTIVITY_RECOVERY_INTERVAL_MS = 3 * 60_000
 
 const statuses: TaskStatus[] = ['needs-action', 'in-process', 'completed', 'cancelled']
 const orderingFields: Array<{ value: TaskOrderField; label: string }> = [
@@ -598,9 +595,6 @@ function App() {
   const syncInFlightRef = useRef<Set<string>>(new Set())
   const autoSyncedAccountIdsRef = useRef<Set<string>>(new Set())
   const syncRunnerRef = useRef<(accountId?: string) => void>(() => {})
-  const connectivityProbeRef = useRef<Promise<boolean> | undefined>()
-  const lastConnectivityProbeAtRef = useRef(0)
-  const lastConnectivityProbeAccountIdRef = useRef<string>()
   const moveTasksToCollectionRef = useRef<(taskIds: string[], targetCollectionId: string) => Promise<void>>(
     () => Promise.resolve(),
   )
@@ -829,69 +823,6 @@ function App() {
       ? `smart:${activeView.smartListId}`
       : undefined
 
-  const probeConnectivity = useCallback(
-    async (account = activeAccount, triggerSync = false, force = false): Promise<boolean> => {
-      if (!account) {
-        setConnectivityState(browserOffline() ? 'offline' : 'online')
-        return false
-      }
-
-      if (browserOffline()) {
-        setConnectivityState('offline')
-        return false
-      }
-
-      if (connectivityProbeRef.current) {
-        return connectivityProbeRef.current
-      }
-
-      const now = Date.now()
-      if (
-        !force &&
-        connectivityState === 'online' &&
-        lastConnectivityProbeAccountIdRef.current === account.id &&
-        now - lastConnectivityProbeAtRef.current < CONNECTIVITY_PROBE_MIN_INTERVAL_MS
-      ) {
-        return true
-      }
-
-      const probe = (async () => {
-        setConnectivityState('checking')
-        lastConnectivityProbeAtRef.current = now
-        lastConnectivityProbeAccountIdRef.current = account.id
-        const controller = new AbortController()
-        const timeoutId = window.setTimeout(() => controller.abort(new Error('Connectivity probe timed out.')), 2_500)
-
-        try {
-          const response = await fetch(BACKEND_HEALTH_ENDPOINT, {
-            method: 'GET',
-            cache: 'no-store',
-            signal: controller.signal,
-          })
-          if (!response.ok) {
-            throw new Error(`Backend health check failed (${response.status}).`)
-          }
-
-          setConnectivityState('online')
-          if (triggerSync) {
-            syncRunnerRef.current(account.id)
-          }
-          return true
-        } catch {
-          setConnectivityState('offline')
-          return false
-        } finally {
-          window.clearTimeout(timeoutId)
-          connectivityProbeRef.current = undefined
-        }
-      })()
-
-      connectivityProbeRef.current = probe
-      return probe
-    },
-    [activeAccount, connectivityState],
-  )
-
   function handleDetectedOffline() {
     setConnectivityState('offline')
   }
@@ -947,6 +878,7 @@ function App() {
     if (
       !hydrated ||
       !activeAccountId ||
+      !snapshot.settings.autoSyncEnabled ||
       !snapshotRef.current.accounts.some((account) => account.id === activeAccountId)
     ) {
       return
@@ -958,7 +890,7 @@ function App() {
 
     autoSyncedAccountIdsRef.current.add(activeAccountId)
     syncRunnerRef.current(activeAccountId)
-  }, [activeAccountId, hydrated])
+  }, [activeAccountId, hydrated, snapshot.settings.autoSyncEnabled])
 
   useEffect(() => {
     if (!hydrated || !activeAccountId || !snapshot.settings.autoSyncEnabled) {
@@ -978,55 +910,15 @@ function App() {
       return
     }
 
-    function handleOnline() {
-      void probeConnectivity(activeAccount, true, true)
-    }
-
     function handleOffline() {
       setConnectivityState('offline')
     }
 
-    function handleVisibilityChange() {
-      if (document.visibilityState === 'visible') {
-        void probeConnectivity(activeAccount)
-      }
-    }
-
-    function handleFocus() {
-      void probeConnectivity(activeAccount)
-    }
-
-    window.addEventListener('online', handleOnline)
     window.addEventListener('offline', handleOffline)
-    window.addEventListener('focus', handleFocus)
-    document.addEventListener('visibilitychange', handleVisibilityChange)
     return () => {
-      window.removeEventListener('online', handleOnline)
       window.removeEventListener('offline', handleOffline)
-      window.removeEventListener('focus', handleFocus)
-      document.removeEventListener('visibilitychange', handleVisibilityChange)
     }
-  }, [activeAccount, activeAccountId, hydrated, probeConnectivity])
-
-  useEffect(() => {
-    if (!hydrated || !activeAccount) {
-      return
-    }
-
-    void probeConnectivity(activeAccount, false, true)
-  }, [activeAccount, hydrated, probeConnectivity])
-
-  useEffect(() => {
-    if (!hydrated || !activeAccount || connectivityState === 'online') {
-      return
-    }
-
-    const intervalId = window.setInterval(() => {
-      void probeConnectivity(activeAccount, connectivityState === 'offline')
-    }, CONNECTIVITY_RECOVERY_INTERVAL_MS)
-
-    return () => window.clearInterval(intervalId)
-  }, [activeAccount, connectivityState, hydrated, probeConnectivity])
+  }, [hydrated])
 
   useEffect(() => {
     const selectedTask = snapshot.tasks.find(
@@ -2361,6 +2253,7 @@ function App() {
         lastSyncAt: new Date().toISOString(),
         lastError: undefined,
       }
+      setConnectivityState('online')
 
       replaceSnapshotWith((current) => {
         const localAccountTasks = current.tasks.filter((entry) => entry.accountId === account.id)
@@ -3975,7 +3868,7 @@ function App() {
                         <label className="simple-row checkbox-row">
                           <div>
                             <strong>Enable periodic sync</strong>
-                            <span>Sync on app open, when coming back online, and at the selected interval.</span>
+                            <span>Sync on app open and at the selected interval. Disabling this also disables background connection checks.</span>
                           </div>
                           <input
                             type="checkbox"
