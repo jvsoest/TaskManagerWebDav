@@ -29,6 +29,18 @@ android/app/src/main/res/xml/config.xml
 *.jks
 *.keystore
 
+# iOS / Capacitor generated files
+ios/DerivedData/
+ios/build/
+ios/App/App/public/
+ios/App/App/capacitor.config.json
+ios/App/App/config.xml
+ios/App/Pods/
+ios/App/Podfile.lock
+ios/App/*.xcworkspace/xcuserdata/
+ios/App/App.xcodeproj/xcuserdata/
+*.xcarchive
+
 # Editor directories and files
 .vscode/*
 !.vscode/extensions.json

@@ -151,7 +151,7 @@ function connectionErrorMessage(_connection: DavConnection, error: unknown): str
 
 async function backendRequest(url: string, init: RequestInit): Promise<Response> {
   if (Capacitor.isNativePlatform()) {
-    // CapacitorHttp patches fetch on Android, so CalDAV can be reached directly
+    // CapacitorHttp patches fetch on Android and iOS, so CalDAV can be reached directly
     // without the Node proxy and without WebView CORS restrictions.
     return fetch(url, init)
   }

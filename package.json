@@ -27,10 +27,16 @@
     "android:sync": "npm run android:build:web && cap sync android",
     "android:apk": "npm run android:sync && cd android && ./gradlew assembleDebug",
     "android:bundle": "npm run android:sync && cd android && ./gradlew bundleRelease",
-    "android:open": "cap open android"
+    "android:open": "cap open android",
+    "ios:build:web": "tsc -b && vite build --mode ios && node scripts/generate-sw.mjs",
+    "ios:sync": "npm run ios:build:web && cap sync ios",
+    "ios:build": "npm run ios:sync && xcodebuild -project ios/App/App.xcodeproj -scheme App -configuration Debug -destination 'generic/platform=iOS' -derivedDataPath ios/DerivedData CODE_SIGNING_ALLOWED=NO build",
+    "ios:archive": "npm run ios:sync && xcodebuild -project ios/App/App.xcodeproj -scheme App -configuration Release -destination 'generic/platform=iOS' -archivePath ios/build/TaskManagerWebDav.xcarchive archive",
+    "ios:open": "cap open ios"
   },
   "dependencies": {
     "@capacitor/core": "^8.5.0",
+    "@capacitor/local-notifications": "^8.2.1",
     "react": "^18.3.1",
     "react-dom": "^18.3.1",
     "react-markdown": "^9.0.1",
@@ -42,6 +48,7 @@
   "devDependencies": {
     "@capacitor/android": "^8.5.0",
     "@capacitor/cli": "^8.5.0",
+    "@capacitor/ios": "^8.5.0",
     "@electron/notarize": "^3.1.0",
     "@types/node": "^25.5.0",
     "@types/react": "^18.3.3",

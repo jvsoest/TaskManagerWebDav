@@ -1,4 +1,6 @@
 import type { TaskItem } from '../types'
+import { Capacitor } from '@capacitor/core'
+import { LocalNotifications } from '@capacitor/local-notifications'
 
 const WINDOW_AHEAD_MS = 15 * 60 * 1000
 const GRACE_WINDOW_MS = 5 * 60 * 1000
@@ -24,6 +26,63 @@ function reminderTimestamp(task: TaskItem): number | undefined {
     .sort((left, right) => left - right)
 
   return upcoming[0]
+}
+
+function taskNotificationTimestamp(task: TaskItem): number | undefined {
+  const timestamp = reminderTimestamp(task) ?? (task.dueDate ? new Date(task.dueDate).getTime() : undefined)
+  return timestamp !== undefined && !Number.isNaN(timestamp) ? timestamp : undefined
+}
+
+export function usesNativeNotifications(): boolean {
+  return Capacitor.getPlatform() === 'ios'
+}
+
+function nativeNotificationId(taskId: string): number {
+  let hash = 0
+  for (let index = 0; index < taskId.length; index += 1) {
+    hash = (Math.imul(hash, 31) + taskId.charCodeAt(index)) | 0
+  }
+  return Math.max(1, Math.abs(hash))
+}
+
+export async function syncNativeNotifications(tasks: TaskItem[]): Promise<void> {
+  if (!usesNativeNotifications()) {
+    return
+  }
+
+  let permission = await LocalNotifications.checkPermissions()
+  const schedulableTasks = tasks.filter((task) => task.status !== 'completed' && taskNotificationTimestamp(task) !== undefined)
+  if (permission.display === 'prompt' && schedulableTasks.length > 0) {
+    permission = await LocalNotifications.requestPermissions()
+  }
+  if (permission.display !== 'granted') {
+    return
+  }
+
+  const pending = await LocalNotifications.getPending()
+  if (pending.notifications.length > 0) {
+    await LocalNotifications.cancel({
+      notifications: pending.notifications.map(({ id }) => ({ id })),
+    })
+  }
+
+  const now = Date.now()
+  const notifications = schedulableTasks
+    .map((task) => ({ task, at: taskNotificationTimestamp(task) }))
+    .filter((entry): entry is { task: TaskItem; at: number } => typeof entry.at === 'number' && entry.at > now)
+    .sort((left, right) => left.at - right.at)
+    .slice(0, 64)
+    .map(({ task, at }) => ({
+      id: nativeNotificationId(task.id),
+      title: task.title || 'Task due soon',
+      body: task.notes || 'A TaskManagerWebDav task needs your attention.',
+      schedule: { at: new Date(at) },
+      extra: { taskId: task.id, accountId: task.accountId },
+    }))
+
+  if (notifications.length > 0) {
+    await LocalNotifications.schedule({ notifications })
+  }
 }
 
 export function canNotify(): boolean {
@@ -52,9 +111,7 @@ export function notifyDueTasks(tasks: TaskItem[], deliveredIds: Set<string>): vo
         return
       }
 
-      const dueAt =
-        reminderTimestamp(task) ??
-        (task.dueDate ? new Date(task.dueDate).getTime() : undefined)
+      const dueAt = taskNotificationTimestamp(task)
 
       if (dueAt === undefined) {
         return
@@ -82,9 +139,7 @@ export function getNextNotificationCheckDelay(tasks: TaskItem[], deliveredIds: S
   tasks
     .filter((task) => task.status !== 'completed' && !deliveredIds.has(task.id))
     .forEach((task) => {
-      const dueAt =
-        reminderTimestamp(task) ??
-        (task.dueDate ? new Date(task.dueDate).getTime() : undefined)
+      const dueAt = taskNotificationTimestamp(task)
 
       if (dueAt === undefined || Number.isNaN(dueAt)) {
         return
