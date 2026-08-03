@@ -22,9 +22,15 @@
     "desktop:dist:mac": "npm run build && electron-builder --mac --universal --publish never",
     "desktop:dist:win": "npm run build && electron-builder --win --x64 --publish never",
     "desktop:dist:linux": "npm run build && electron-builder --linux --x64 --publish never",
-    "desktop:dist:dir": "npm run build && electron-builder --dir"
+    "desktop:dist:dir": "npm run build && electron-builder --dir",
+    "android:build:web": "tsc -b && vite build --mode android && node scripts/generate-sw.mjs",
+    "android:sync": "npm run android:build:web && cap sync android",
+    "android:apk": "npm run android:sync && cd android && ./gradlew assembleDebug",
+    "android:bundle": "npm run android:sync && cd android && ./gradlew bundleRelease",
+    "android:open": "cap open android"
   },
   "dependencies": {
+    "@capacitor/core": "^8.5.0",
     "react": "^18.3.1",
     "react-dom": "^18.3.1",
     "react-markdown": "^9.0.1",
@@ -34,6 +40,8 @@
     "remark-gfm": "^4.0.0"
   },
   "devDependencies": {
+    "@capacitor/android": "^8.5.0",
+    "@capacitor/cli": "^8.5.0",
     "@electron/notarize": "^3.1.0",
     "@types/node": "^25.5.0",
     "@types/react": "^18.3.3",

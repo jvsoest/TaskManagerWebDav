@@ -10,11 +10,11 @@ function gitCommitHash(): string {
   }
 }
 
-export default defineConfig({
-  base: '/',
+export default defineConfig(({ mode }) => ({
+  base: mode === 'android' ? './' : '/',
   define: {
     __BUILD_TIMESTAMP__: JSON.stringify(new Date().toISOString()),
     __BUILD_COMMIT__: JSON.stringify(gitCommitHash()),
   },
   plugins: [react()],
-})
+}))

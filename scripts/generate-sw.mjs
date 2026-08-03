@@ -90,13 +90,7 @@ self.addEventListener('fetch', (event) => {
 
   if (event.request.mode === 'navigate') {
     event.respondWith(
-      fetch(event.request)
-        .then((response) => {
-          const clone = response.clone()
-          void caches.open(CACHE_NAME).then((cache) => cache.put(INDEX_URL, clone))
-          return response
-        })
-        .catch(async () => (await caches.match(INDEX_URL)) ?? (await caches.match('/'))),
+      caches.match(INDEX_URL).then((cached) => cached ?? fetch(event.request)),
     )
     return
   }

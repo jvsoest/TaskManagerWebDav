@@ -1,5 +1,7 @@
+import { Capacitor } from '@capacitor/core'
+
 export async function registerServiceWorker(): Promise<void> {
-  if (!('serviceWorker' in navigator)) {
+  if (Capacitor.isNativePlatform() || !('serviceWorker' in navigator)) {
     return
   }
 

@@ -14,6 +14,21 @@ desktop-dist
 *.local
 docker-data/
 
+# Android / Capacitor generated files
+android/.gradle/
+.gradle-user-home/
+android/.idea/
+android/local.properties
+android/**/build/
+android/app/src/main/assets/public/
+android/app/src/main/assets/capacitor.config.json
+android/app/src/main/assets/capacitor.plugins.json
+android/app/src/main/res/xml/config.xml
+*.apk
+*.aab
+*.jks
+*.keystore
+
 # Editor directories and files
 .vscode/*
 !.vscode/extensions.json
