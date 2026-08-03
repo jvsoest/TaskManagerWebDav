@@ -18,7 +18,10 @@
     "proxy:test-auth": "node proxy/test-auth.mjs",
     "migrate:task-ids": "node scripts/migrate-task-ids-to-collection-scope.mjs",
     "desktop:dev": "npm run build && electron .",
-    "desktop:dist": "npm run build && electron-builder",
+    "desktop:dist": "npm run build && electron-builder --publish never",
+    "desktop:dist:mac": "npm run build && electron-builder --mac --universal --publish never",
+    "desktop:dist:win": "npm run build && electron-builder --win --x64 --publish never",
+    "desktop:dist:linux": "npm run build && electron-builder --linux --x64 --publish never",
     "desktop:dist:dir": "npm run build && electron-builder --dir"
   },
   "dependencies": {
@@ -67,7 +70,12 @@
       "entitlements": "electron/entitlements.mac.plist",
       "entitlementsInherit": "electron/entitlements.mac.plist",
       "target": [
-        "dmg"
+        {
+          "target": "dmg",
+          "arch": [
+            "universal"
+          ]
+        }
       ]
     },
     "linux": {
@@ -79,8 +87,18 @@
     },
     "win": {
       "target": [
-        "nsis",
-        "portable"
+        {
+          "target": "nsis",
+          "arch": [
+            "x64"
+          ]
+        },
+        {
+          "target": "portable",
+          "arch": [
+            "x64"
+          ]
+        }
       ]
     }
   }

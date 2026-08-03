@@ -107,24 +107,26 @@ npm run desktop:dist
 
 GitHub Actions desktop packaging workflow:
 
-- [`.github/workflows/publish-desktop.yml`](/home/jsoest/Repositories/TaskManagerWebDav/.github/workflows/publish-desktop.yml)
+- [`.github/workflows/publish-desktop.yml`](.github/workflows/publish-desktop.yml)
 
 Package targets:
 
 - Windows: NSIS installer and portable executable
-- macOS: DMG
+- macOS: universal DMG (Intel and Apple Silicon)
 - Linux: AppImage and `.deb`
 
 Desktop notes:
 
 - Electron uses a fixed local origin so desktop app data survives across restarts.
 - Desktop account passwords are stored in Electron `safeStorage`-encrypted app data instead of browser storage.
-- Release signing uses standard Electron Builder environment variables:
-  - `CSC_LINK`
-  - `CSC_KEY_PASSWORD`
+- Configure these GitHub Actions secrets for trusted release builds:
+  - `WIN_CSC_LINK` and `WIN_CSC_KEY_PASSWORD`: a trusted Authenticode PFX and its password. The legacy `CSC_LINK` and `CSC_KEY_PASSWORD` names remain supported for Windows.
+  - `MAC_CSC_LINK` and `MAC_CSC_KEY_PASSWORD`: an Apple Developer ID Application certificate and its password.
   - `APPLE_ID`
   - `APPLE_APP_SPECIFIC_PASSWORD`
   - `APPLE_TEAM_ID`
+- Windows executables only display a verified publisher when the certificate chains to a CA trusted by Windows. The workflow verifies every generated `.exe` when Windows signing is configured.
+- macOS notarization only runs when both the macOS signing certificate and all Apple credentials are configured. Unsigned pull-request builds therefore remain buildable.
 
 ## Local CalDAV test server
 
