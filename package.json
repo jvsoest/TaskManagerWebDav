@@ -67,6 +67,7 @@
   "build": {
     "appId": "co.taskmanagerwebdav.app",
     "productName": "TaskManagerWebDav",
+    "icon": "build/icon.png",
     "directories": {
       "output": "desktop-dist"
     },
@@ -75,6 +76,12 @@
       "electron/**/*",
       "proxy/**/*",
       "package.json"
+    ],
+    "extraResources": [
+      {
+        "from": "build/icon.png",
+        "to": "icon.png"
+      }
     ],
     "asar": true,
     "afterSign": "electron/notarize.mjs",

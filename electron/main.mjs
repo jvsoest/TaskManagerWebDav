@@ -8,6 +8,9 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url))
 const DESKTOP_HOST = '127.0.0.1'
 const DESKTOP_PORT = 51880
 const CREDENTIALS_FILE_NAME = 'desktop-credentials.json'
+const APP_ICON_PATH = app.isPackaged
+  ? path.join(process.resourcesPath, 'icon.png')
+  : path.join(__dirname, '..', 'build', 'icon.png')
 
 let mainWindow
 let serverHandle
@@ -125,6 +128,7 @@ async function createMainWindow() {
     minHeight: 720,
     backgroundColor: '#f7f4ee',
     autoHideMenuBar: true,
+    icon: APP_ICON_PATH,
     webPreferences: {
       contextIsolation: true,
       nodeIntegration: false,
@@ -175,6 +179,9 @@ app.on('activate', () => {
 
 app.whenReady()
   .then(async () => {
+    if (process.platform === 'darwin') {
+      app.dock.setIcon(APP_ICON_PATH)
+    }
     await registerCredentialHandlers()
     await createMainWindow()
   })
