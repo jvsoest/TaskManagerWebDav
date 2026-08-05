@@ -1149,7 +1149,7 @@ function App() {
     return openVisibleTasks.filter((task) => !dragSession.taskIds.includes(task.id))
   }, [canManualReorderTasks, dragSession, openVisibleTasks])
   const renderedCompletedTasks = completedVisibleTasks
-  const shouldSplitPlannedTasks = activeView?.kind === 'collection'
+  const shouldSplitPlannedTasks = Boolean(activeView)
   const plannedOpenTasks = useMemo(
     () =>
       shouldSplitPlannedTasks
