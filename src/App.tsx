@@ -419,6 +419,20 @@ function isPlannedTask(task: Pick<TaskItem, 'startDate' | 'dueDate'>): boolean {
   return Boolean(task.startDate || task.dueDate)
 }
 
+function comparePlannedTasksByDueDate(
+  left: Pick<TaskItem, 'dueDate'>,
+  right: Pick<TaskItem, 'dueDate'>,
+): number {
+  if (!left.dueDate) {
+    return right.dueDate ? 1 : 0
+  }
+  if (!right.dueDate) {
+    return -1
+  }
+
+  return left.dueDate.localeCompare(right.dueDate)
+}
+
 function syncLabel(value?: string): string {
   if (!value) {
     return 'Not synced yet'
@@ -1136,7 +1150,12 @@ function App() {
   const renderedCompletedTasks = completedVisibleTasks
   const shouldSplitPlannedTasks = activeView?.kind === 'collection'
   const plannedOpenTasks = useMemo(
-    () => (shouldSplitPlannedTasks ? renderedOpenTasks.filter((task) => isPlannedTask(task)) : []),
+    () =>
+      shouldSplitPlannedTasks
+        ? renderedOpenTasks
+            .filter((task) => isPlannedTask(task))
+            .sort(comparePlannedTasksByDueDate)
+        : [],
     [renderedOpenTasks, shouldSplitPlannedTasks],
   )
   const primaryOpenTasks = useMemo(
