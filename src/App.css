@@ -754,6 +754,16 @@ button {
   margin-bottom: 10px;
 }
 
+.smart-list-unplanned-group {
+  margin-top: 0;
+}
+
+.smart-list-planned-group + .smart-list-unplanned-group {
+  margin-top: 16px;
+  padding-top: 10px;
+  border-top: 1px solid var(--line);
+}
+
 .task-subsection-count {
   margin-left: auto;
 }

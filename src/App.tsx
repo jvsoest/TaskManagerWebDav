@@ -4357,7 +4357,20 @@ function App() {
                     </section>
                   )}
 
-                  {primaryOpenTasks.map((task, index) => renderTaskRow(task, { index, dropIndex }))}
+                  {activeView?.kind === 'smart' && primaryOpenTasks.length > 0 && (
+                    <section className="task-subsection smart-list-unplanned-group">
+                      <header className="task-subsection-heading">
+                        <span>Not planned</span>
+                        <span className="task-subsection-count">{primaryOpenTasks.length}</span>
+                      </header>
+                      <div className="task-subsection-body">
+                        {primaryOpenTasks.map((task) => renderTaskRow(task))}
+                      </div>
+                    </section>
+                  )}
+
+                  {activeView?.kind === 'collection' &&
+                    primaryOpenTasks.map((task, index) => renderTaskRow(task, { index, dropIndex }))}
 
                   {dragSession && dropIndex === primaryOpenTasks.length && <div className="task-drop-slot" />}
 
