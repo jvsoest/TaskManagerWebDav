@@ -51,8 +51,12 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
-      - name: Build macOS package
-        if: runner.os == 'macOS'
+      - name: Build unsigned macOS package
+        if: runner.os == 'macOS' && env.MAC_SIGNING_ENABLED != 'true'
+        run: ${{ matrix.command }}
+
+      - name: Build signed and notarized macOS package
+        if: runner.os == 'macOS' && env.MAC_SIGNING_ENABLED == 'true'
         run: ${{ matrix.command }}
         env:
           CSC_LINK: ${{ secrets.MAC_CSC_LINK }}
@@ -68,8 +72,12 @@ jobs:
           codesign --verify --deep --strict --verbose=2 "$APP_PATH"
           spctl --assess --type execute --verbose=2 "$APP_PATH"
 
-      - name: Build Windows package
-        if: runner.os == 'Windows'
+      - name: Build unsigned Windows package
+        if: runner.os == 'Windows' && env.WINDOWS_SIGNING_ENABLED != 'true'
+        run: ${{ matrix.command }}
+
+      - name: Build signed Windows package
+        if: runner.os == 'Windows' && env.WINDOWS_SIGNING_ENABLED == 'true'
         run: ${{ matrix.command }}
         env:
           # A trusted Authenticode PFX is required to show a verified publisher.

@@ -21,7 +21,12 @@ import {
   validateSmartListDefinition,
 } from './lib/filters'
 import { clearLocalCache, loadSnapshot, saveSnapshot } from './lib/idb'
-import { getNextNotificationCheckDelay, notifyDueTasks } from './lib/notifications'
+import {
+  getNextNotificationCheckDelay,
+  notifyDueTasks,
+  syncNativeNotifications,
+  usesNativeNotifications,
+} from './lib/notifications'
 import { unregisterServiceWorkers } from './lib/pwa'
 import {
   createTaskCollection,
@@ -995,6 +1000,15 @@ function App() {
     let cancelled = false
 
     const tasks = snapshot.tasks.filter((task) => task.accountId === activeAccountId)
+
+    if (usesNativeNotifications()) {
+      void syncNativeNotifications(tasks).catch((error) => {
+        console.error('Failed to schedule native notifications', error)
+      })
+      return () => {
+        cancelled = true
+      }
+    }
 
     function scheduleNextCheck() {
       if (cancelled) {

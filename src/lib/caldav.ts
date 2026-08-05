@@ -1,3 +1,4 @@
+import { Capacitor } from '@capacitor/core'
 import {
   createDefaultMetadata,
   defaultFilter,
@@ -149,6 +150,12 @@ function connectionErrorMessage(_connection: DavConnection, error: unknown): str
 }
 
 async function backendRequest(url: string, init: RequestInit): Promise<Response> {
+  if (Capacitor.isNativePlatform()) {
+    // CapacitorHttp patches fetch on Android and iOS, so CalDAV can be reached directly
+    // without the Node proxy and without WebView CORS restrictions.
+    return fetch(url, init)
+  }
+
   const headers = new Headers(init.headers)
   const body = typeof init.body === 'string' ? init.body : undefined
 

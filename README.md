@@ -128,6 +128,55 @@ Desktop notes:
 - Windows executables only display a verified publisher when the certificate chains to a CA trusted by Windows. The workflow verifies every generated `.exe` when Windows signing is configured.
 - macOS notarization only runs when both the macOS signing certificate and all Apple credentials are configured. Unsigned pull-request builds therefore remain buildable.
 
+## Android app
+
+The React application is also packaged as a native Android app with Capacitor. On Android, CalDAV requests use Capacitor's native HTTP implementation directly; the web and Electron applications continue to use the integrated `/dav` proxy.
+
+Build an installable debug APK:
+
+```bash
+npm run android:apk
+```
+
+Build a release Android App Bundle for Google Play:
+
+```bash
+npm run android:bundle
+```
+
+The Android workflow uploads both the debug APK and release AAB. Configure these GitHub Actions secrets to sign the release bundle:
+
+- `ANDROID_KEYSTORE_BASE64`: the release `.jks` file encoded as Base64
+- `ANDROID_KEYSTORE_PASSWORD`
+- `ANDROID_KEY_ALIAS`
+- `ANDROID_KEY_PASSWORD`
+
+Without these secrets, the debug APK remains installable for testing, while the generated release AAB is unsigned and cannot be uploaded to Google Play.
+
+## iOS app
+
+The React application is also packaged as a native iPhone and iPad app with Capacitor. It uses the same task model, CalDAV implementation, smart lists, filters, and offline cache as the web, PWA, desktop, and Android applications. CalDAV calls use Capacitor's native HTTP implementation, while reminders are scheduled through iOS local notifications.
+
+Build and compile the app without code signing:
+
+```bash
+npm run ios:build
+```
+
+Open the project in Xcode to run it on a simulator or a signed device:
+
+```bash
+npm run ios:open
+```
+
+Create a signed archive after selecting an Apple Developer team in Xcode:
+
+```bash
+npm run ios:archive
+```
+
+The iOS workflow compiles the project without signing and uploads the generated `.app` as a CI artifact. Distribution through TestFlight or the App Store requires an Apple Developer team, a distribution certificate, and an App Store provisioning profile. Production CalDAV servers must use HTTPS to comply with iOS App Transport Security.
+
 ## Local CalDAV test server
 
 This repository includes a Docker Compose CalDAV server based on Radicale for local testing.
