@@ -747,6 +747,28 @@ button {
   gap: 6px;
 }
 
+.task-collection-group {
+  display: grid;
+  gap: 6px;
+  margin-top: 14px;
+}
+
+.task-collection-group:first-child {
+  margin-top: 0;
+}
+
+.task-collection-group-header {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 2px;
+  color: var(--muted);
+  font-size: 0.9rem;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+  border-bottom: 1px solid var(--line);
+}
+
 .priority-badge {
   padding: 4px 7px;
   border-radius: 999px;

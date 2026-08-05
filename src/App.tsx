@@ -1079,7 +1079,8 @@ function App() {
             },
     [activeSmartList?.ordering, activeView, currentTaskListOrdering],
   )
-  const canManualReorderTasks = activeView?.kind === 'collection' && currentOrdering.mode === 'manual'
+  const canManualReorderTasks =
+    activeView?.kind === 'collection' && currentOrdering.mode === 'manual' && collectionViewScope === 'self'
 
   const scopedVisibleTasks = useMemo(() => {
     let tasks = activeTasks
@@ -1162,6 +1163,31 @@ function App() {
     () => (shouldSplitPlannedTasks ? renderedOpenTasks.filter((task) => !isPlannedTask(task)) : renderedOpenTasks),
     [renderedOpenTasks, shouldSplitPlannedTasks],
   )
+  const shouldGroupTasksByCollection =
+    activeView?.kind === 'collection' && collectionViewScope === 'self-and-descendants'
+  const collectionTaskGroups = useMemo(() => {
+    if (!shouldGroupTasksByCollection) {
+      return []
+    }
+
+    return collectionTreeOptions
+      .map((option) => ({
+        collection: option.node,
+        primaryTasks: primaryOpenTasks.filter((task) => task.collectionId === option.id),
+        plannedTasks: plannedOpenTasks.filter((task) => task.collectionId === option.id),
+        completedTasks: renderedCompletedTasks.filter((task) => task.collectionId === option.id),
+      }))
+      .filter(
+        (group) =>
+          group.primaryTasks.length > 0 || group.plannedTasks.length > 0 || group.completedTasks.length > 0,
+      )
+  }, [
+    collectionTreeOptions,
+    plannedOpenTasks,
+    primaryOpenTasks,
+    renderedCompletedTasks,
+    shouldGroupTasksByCollection,
+  ])
   const visibleRenderedTasks = useMemo(
     () => [
       ...primaryOpenTasks,
@@ -4278,29 +4304,69 @@ function App() {
                 </div>
               )}
 
-              {primaryOpenTasks.map((task, index) => renderTaskRow(task, { index, dropIndex }))}
+              {shouldGroupTasksByCollection ? (
+                collectionTaskGroups.map((group) => (
+                  <section className="task-collection-group" key={group.collection.id}>
+                    <header className="task-collection-group-header">
+                      <span>{group.collection.name}</span>
+                      <span className="task-subsection-count">
+                        {group.primaryTasks.length + group.plannedTasks.length + group.completedTasks.length}
+                      </span>
+                    </header>
 
-              {dragSession && dropIndex === primaryOpenTasks.length && <div className="task-drop-slot" />}
+                    {group.primaryTasks.map((task) => {
+                      const index = primaryOpenTasks.indexOf(task)
+                      return renderTaskRow(task, { index, dropIndex })
+                    })}
 
-              {plannedOpenTasks.length > 0 && (
-                <div className="task-subsection">
-                  <button
-                    className="task-subsection-toggle"
-                    onClick={() => setIsPlannedSectionCollapsed((current) => !current)}
-                  >
-                    <span>{isPlannedSectionCollapsed ? '▸' : '▾'}</span>
-                    <span>Planned</span>
-                    <span className="task-subsection-count">{plannedOpenTasks.length}</span>
-                  </button>
-                  {!isPlannedSectionCollapsed && (
-                    <div className="task-subsection-body">
-                      {plannedOpenTasks.map((task) => renderTaskRow(task))}
+                    {group.plannedTasks.length > 0 && (
+                      <div className="task-subsection">
+                        <button
+                          className="task-subsection-toggle"
+                          onClick={() => setIsPlannedSectionCollapsed((current) => !current)}
+                        >
+                          <span>{isPlannedSectionCollapsed ? '▸' : '▾'}</span>
+                          <span>Planned</span>
+                          <span className="task-subsection-count">{group.plannedTasks.length}</span>
+                        </button>
+                        {!isPlannedSectionCollapsed && (
+                          <div className="task-subsection-body">
+                            {group.plannedTasks.map((task) => renderTaskRow(task))}
+                          </div>
+                        )}
+                      </div>
+                    )}
+
+                    {group.completedTasks.map((task) => renderTaskRow(task))}
+                  </section>
+                ))
+              ) : (
+                <>
+                  {primaryOpenTasks.map((task, index) => renderTaskRow(task, { index, dropIndex }))}
+
+                  {dragSession && dropIndex === primaryOpenTasks.length && <div className="task-drop-slot" />}
+
+                  {plannedOpenTasks.length > 0 && (
+                    <div className="task-subsection">
+                      <button
+                        className="task-subsection-toggle"
+                        onClick={() => setIsPlannedSectionCollapsed((current) => !current)}
+                      >
+                        <span>{isPlannedSectionCollapsed ? '▸' : '▾'}</span>
+                        <span>Planned</span>
+                        <span className="task-subsection-count">{plannedOpenTasks.length}</span>
+                      </button>
+                      {!isPlannedSectionCollapsed && (
+                        <div className="task-subsection-body">
+                          {plannedOpenTasks.map((task) => renderTaskRow(task))}
+                        </div>
+                      )}
                     </div>
                   )}
-                </div>
-              )}
 
-              {renderedCompletedTasks.map((task) => renderTaskRow(task))}
+                  {renderedCompletedTasks.map((task) => renderTaskRow(task))}
+                </>
+              )}
             </div>
             {dragSession && draggedTask && (
               <div
