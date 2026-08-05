@@ -124,8 +124,8 @@ async function createMainWindow() {
   mainWindow = new BrowserWindow({
     width: 1440,
     height: 920,
-    minWidth: 1024,
-    minHeight: 720,
+    minWidth: 360,
+    minHeight: 480,
     backgroundColor: '#f7f4ee',
     autoHideMenuBar: true,
     icon: APP_ICON_PATH,
