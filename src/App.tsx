@@ -1189,12 +1189,15 @@ function App() {
     shouldGroupTasksByCollection,
   ])
   const visibleRenderedTasks = useMemo(
-    () => [
-      ...primaryOpenTasks,
-      ...(isPlannedSectionCollapsed ? [] : plannedOpenTasks),
-      ...renderedCompletedTasks,
-    ],
-    [isPlannedSectionCollapsed, plannedOpenTasks, primaryOpenTasks, renderedCompletedTasks],
+    () =>
+      activeView?.kind === 'smart'
+        ? [...plannedOpenTasks, ...primaryOpenTasks, ...renderedCompletedTasks]
+        : [
+            ...primaryOpenTasks,
+            ...(isPlannedSectionCollapsed ? [] : plannedOpenTasks),
+            ...renderedCompletedTasks,
+          ],
+    [activeView?.kind, isPlannedSectionCollapsed, plannedOpenTasks, primaryOpenTasks, renderedCompletedTasks],
   )
   const draggedTask = dragSession ? visibleTasks.find((task) => task.id === dragSession.primaryTaskId) : undefined
   const draggedSettingsCollection =
@@ -4342,11 +4345,23 @@ function App() {
                 ))
               ) : (
                 <>
+                  {activeView?.kind === 'smart' && plannedOpenTasks.length > 0 && (
+                    <section className="task-subsection smart-list-planned-group">
+                      <header className="task-subsection-heading">
+                        <span>Planned</span>
+                        <span className="task-subsection-count">{plannedOpenTasks.length}</span>
+                      </header>
+                      <div className="task-subsection-body">
+                        {plannedOpenTasks.map((task) => renderTaskRow(task))}
+                      </div>
+                    </section>
+                  )}
+
                   {primaryOpenTasks.map((task, index) => renderTaskRow(task, { index, dropIndex }))}
 
                   {dragSession && dropIndex === primaryOpenTasks.length && <div className="task-drop-slot" />}
 
-                  {plannedOpenTasks.length > 0 && (
+                  {activeView?.kind === 'collection' && plannedOpenTasks.length > 0 && (
                     <div className="task-subsection">
                       <button
                         className="task-subsection-toggle"
